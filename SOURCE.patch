@@ -1,0 +1,429 @@
+diff --git a/bindings/wasm/src/lib.rs b/bindings/wasm/src/lib.rs
+index cf11f7a..5b12ba8 100644
+--- a/bindings/wasm/src/lib.rs
++++ b/bindings/wasm/src/lib.rs
+@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
+ use wasm_bindgen::prelude::*;
+ use wasm_bindgen::JsCast;
+ 
+-use duke_sheets::{CalculationOptions, WorkbookCalculationExt};
++use duke_sheets::{CalculationOptions, FormulaValue, WorkbookCalculationExt};
+ use duke_sheets_core::{
+     CellAddress, CellError, CellRange, CellValue as CoreCellValue, Workbook as CoreWorkbook,
+ };
+@@ -134,6 +134,10 @@ impl SendSyncFunction {
+         self.0.call1(this, arg)
+     }
+ 
++    fn call2(&self, this: &JsValue, arg1: &JsValue, arg2: &JsValue) -> Result<JsValue, JsValue> {
++        self.0.call2(this, arg1, arg2)
++    }
++
+     fn call3(
+         &self,
+         this: &JsValue,
+@@ -670,6 +674,9 @@ impl Workbook {
+             let rtd_js_fn = js_sys::Reflect::get(&options, &JsValue::from_str("rtdFn"))
+                 .ok()
+                 .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
++            let external_js_fn = js_sys::Reflect::get(&options, &JsValue::from_str("externalFnFn"))
++                .ok()
++                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+ 
+             let js_opts: JsCalculationOptions =
+                 serde_wasm_bindgen::from_value(options).map_err(to_js_error)?;
+@@ -708,6 +715,21 @@ impl Workbook {
+                     as Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>
+             });
+ 
++            // Build external_fn from callback: externalFnFn(name, args[]) -> number|string|bool|null
++            let external_fn = external_js_fn.map(|js_fn| {
++                let wrapper = SendSyncFunction(js_fn);
++                Arc::new(move |name: &str, args: &[String]| -> Option<FormulaValue> {
++                    let args_arr = js_sys::Array::new();
++                    for a in args {
++                        args_arr.push(&JsValue::from_str(a));
++                    }
++                    let result = wrapper
++                        .call2(&JsValue::NULL, &JsValue::from_str(name), &args_arr.into())
++                        .ok()?;
++                    js_value_to_formula_value(result)
++                }) as Arc<dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync>
++            });
++
+             CalculationOptions {
+                 iterative: js_opts.iterative.unwrap_or(false),
+                 max_iterations: js_opts.max_iterations.unwrap_or(100),
+@@ -718,6 +740,7 @@ impl Workbook {
+                 max_threads: js_opts.max_threads,
+                 web_service_fn,
+                 rtd_fn,
++                external_fn,
+             }
+         } else {
+             CalculationOptions::default()
+@@ -745,6 +768,22 @@ impl Default for Workbook {
+     }
+ }
+ 
++/// Convert a JS value returned by an `externalFnFn` callback into a typed FormulaValue.
++/// `null`/`undefined` -> `None` (yields `#N/A`). Booleans take priority over numbers.
++fn js_value_to_formula_value(value: JsValue) -> Option<FormulaValue> {
++    if value.is_null() || value.is_undefined() {
++        None
++    } else if let Some(b) = value.as_bool() {
++        Some(FormulaValue::Boolean(b))
++    } else if let Some(n) = value.as_f64() {
++        Some(FormulaValue::Number(n))
++    } else if let Some(s) = value.as_string() {
++        Some(FormulaValue::String(s))
++    } else {
++        None
++    }
++}
++
+ fn js_to_cell_value(value: JsValue) -> Result<CoreCellValue, JsError> {
+     if value.is_null() || value.is_undefined() {
+         Ok(CoreCellValue::Empty)
+diff --git a/crates/duke-sheets-formula/src/ast.rs b/crates/duke-sheets-formula/src/ast.rs
+index 2000191..42cd33f 100644
+--- a/crates/duke-sheets-formula/src/ast.rs
++++ b/crates/duke-sheets-formula/src/ast.rs
+@@ -42,6 +42,18 @@ pub enum FormulaExpr {
+         args: Vec<FormulaExpr>,
+     },
+ 
++    /// External add-in function call, e.g. `[1]!TBLink("Consolidated","CONSUL[3]",...)`.
++    /// `book` is the external-workbook index/name between the brackets (`"1"`); `name` keeps
++    /// the add-in function name verbatim (case preserved — e.g. `TBLink`, `cyedate`).
++    /// Evaluated via a host callback (`EvaluationContext::external_fn`) rather than the
++    /// built-in registry, so the host (browser) can resolve it against a server while the
++    /// formula text stays untouched (and still resolves via the add-in in Excel).
++    ExternalFunction {
++        book: String,
++        name: String,
++        args: Vec<FormulaExpr>,
++    },
++
+     Array(Vec<Vec<FormulaExpr>>),
+ 
+     /// Empty/omitted argument (e.g., the missing 4th arg in `XLOOKUP(x,a,b,,1)`)
+diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
+index 97f9703..a848266 100644
+--- a/crates/duke-sheets-formula/src/evaluator.rs
++++ b/crates/duke-sheets-formula/src/evaluator.rs
+@@ -188,6 +188,11 @@ pub struct EvaluationContext<'a> {
+     pub web_service_fn: Option<&'a (dyn Fn(&str) -> Option<String> + Send + Sync)>,
+     /// Optional RTD callback.
+     pub rtd_fn: Option<&'a (dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync)>,
++    /// Optional external add-in function callback for `[N]!Name(args)` calls (e.g. CCH `TBLink`).
++    /// Receives the verbatim function name and stringified args; returns a typed value, or
++    /// `None` to yield `#N/A`. Lets a host (browser) resolve add-in functions against a server
++    /// while the formula text stays untouched (and still resolves via the add-in in Excel).
++    pub external_fn: Option<&'a (dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync)>,
+     /// Optional IMAGE metadata sink.
+     pub image_sink: Option<&'a (dyn Fn(usize, u32, u16, ImageInfo) + Send + Sync)>,
+     /// Shared evaluation cache (range materialization, lookup indexes, sheet names).
+@@ -204,6 +209,7 @@ impl<'a> EvaluationContext<'a> {
+             current_col: col,
+             web_service_fn: None,
+             rtd_fn: None,
++            external_fn: None,
+             image_sink: None,
+             eval_cache: None,
+         }
+@@ -218,6 +224,7 @@ impl<'a> EvaluationContext<'a> {
+             current_col: 0,
+             web_service_fn: None,
+             rtd_fn: None,
++            external_fn: None,
+             image_sink: None,
+             eval_cache: None,
+         }
+@@ -796,6 +803,10 @@ pub fn evaluate(expr: &FormulaExpr, ctx: &EvaluationContext) -> FormulaResult<Fo
+ 
+         FormulaExpr::Function { name, args } => evaluate_function(name, args, ctx),
+ 
++        FormulaExpr::ExternalFunction { name, args, .. } => {
++            evaluate_external_function(name, args, ctx)
++        }
++
+         FormulaExpr::Array(rows) => {
+             let mut result_rows = Vec::new();
+             for row in rows {
+@@ -2093,6 +2104,56 @@ fn evaluate_vlookup_fast(
+ }
+ 
+ /// Evaluate a function call
++/// Evaluate an external add-in function call (`[N]!Name(args)`) by delegating to the host's
++/// `external_fn` callback. Args are evaluated then stringified (CCH add-in args are string/number
++/// literals). Returns the callback's typed value, or `#N/A` when no callback is set / unresolved
++/// (matching WEBSERVICE's no-handler behavior).
++fn evaluate_external_function(
++    name: &str,
++    args: &[FormulaExpr],
++    ctx: &EvaluationContext,
++) -> FormulaResult<FormulaValue> {
++    let mut arg_strings = Vec::with_capacity(args.len());
++    for arg in args {
++        let value = evaluate(arg, ctx)?;
++        if let FormulaValue::Error(e) = value {
++            return Ok(FormulaValue::Error(e));
++        }
++        arg_strings.push(external_arg_to_string(&value));
++    }
++
++    match ctx.external_fn {
++        Some(handler) => {
++            Ok(handler(name, &arg_strings).unwrap_or(FormulaValue::Error(CellError::Na)))
++        }
++        None => Ok(FormulaValue::Error(CellError::Na)),
++    }
++}
++
++/// Render an evaluated argument as the string the host callback receives.
++fn external_arg_to_string(value: &FormulaValue) -> String {
++    match value {
++        FormulaValue::String(s) => s.clone(),
++        FormulaValue::Number(n) => {
++            if n.fract() == 0.0 && n.is_finite() {
++                format!("{}", *n as i64)
++            } else {
++                format!("{}", n)
++            }
++        }
++        FormulaValue::Boolean(b) => {
++            if *b {
++                "TRUE".to_string()
++            } else {
++                "FALSE".to_string()
++            }
++        }
++        FormulaValue::Empty => String::new(),
++        // Errors are returned early above; arrays aren't expected as add-in args.
++        FormulaValue::Error(_) | FormulaValue::Array { .. } => String::new(),
++    }
++}
++
+ fn evaluate_function(
+     name: &str,
+     args: &[FormulaExpr],
+diff --git a/crates/duke-sheets-formula/src/parser.rs b/crates/duke-sheets-formula/src/parser.rs
+index 2634cd8..2677317 100644
+--- a/crates/duke-sheets-formula/src/parser.rs
++++ b/crates/duke-sheets-formula/src/parser.rs
+@@ -874,11 +874,20 @@ impl<'a> FormulaParser<'a> {
+     }
+ 
+     fn parse_function_call(&mut self, name: String) -> FormulaResult<FormulaExpr> {
++        let args = self.parse_call_args()?;
++        Ok(FormulaExpr::Function {
++            name: name.to_uppercase(),
++            args,
++        })
++    }
++
++    /// Parse a parenthesized, comma-separated argument list (supports empty/omitted args,
++    /// e.g. `XLOOKUP(x,a,b,,1)`). Assumes the next token is `(`.
++    fn parse_call_args(&mut self) -> FormulaResult<Vec<FormulaExpr>> {
+         self.expect(&Token::LeftParen)?;
+ 
+         let mut args = Vec::new();
+ 
+-        // Parse arguments, supporting empty/omitted args (e.g., XLOOKUP(x,a,b,,1))
+         if !matches!(self.current_token(), Token::RightParen) {
+             // First argument: empty if immediately followed by comma
+             if matches!(self.current_token(), Token::Comma) {
+@@ -899,11 +908,7 @@ impl<'a> FormulaParser<'a> {
+         }
+ 
+         self.expect(&Token::RightParen)?;
+-
+-        Ok(FormulaExpr::Function {
+-            name: name.to_uppercase(),
+-            args,
+-        })
++        Ok(args)
+     }
+ 
+     fn parse_sheet_reference(&mut self, sheet: String) -> FormulaResult<FormulaExpr> {
+@@ -977,6 +982,32 @@ impl<'a> FormulaParser<'a> {
+                 // Named range in external workbook
+                 Ok(FormulaExpr::NameRef(format!("[{}]{}", content, name)))
+             }
++            // Book-scoped reference: `[book]!Name` or `[book]!Name(args)`. The lone `!`
++            // scans as Unknown('!'). This is how CCH add-in calls appear, e.g.
++            // `=[1]!TBLink("Consolidated","CONSUL[3]","1000-499-814","0","3")`.
++            Token::Unknown('!') => {
++                self.consume(); // consume '!'
++                match self.current_token().clone() {
++                    Token::Identifier(name) => {
++                        self.consume();
++                        if matches!(self.current_token(), Token::LeftParen) {
++                            // External add-in function call (name kept verbatim for the host callback).
++                            let args = self.parse_call_args()?;
++                            Ok(FormulaExpr::ExternalFunction {
++                                book: content,
++                                name,
++                                args,
++                            })
++                        } else {
++                            // Book-scoped defined name.
++                            Ok(FormulaExpr::NameRef(format!("[{}]!{}", content, name)))
++                        }
++                    }
++                    _ => Err(FormulaError::Parse(
++                        "Expected name after external workbook '!'".into(),
++                    )),
++                }
++            }
+             _ => {
+                 // Not followed by a reference - unqualified structured ref
+                 self.parse_structured_ref_content(None, &content)
+diff --git a/crates/duke-sheets-xls/src/writer.rs b/crates/duke-sheets-xls/src/writer.rs
+index 381a937..b706ce6 100644
+--- a/crates/duke-sheets-xls/src/writer.rs
++++ b/crates/duke-sheets-xls/src/writer.rs
+@@ -2906,6 +2906,7 @@ fn compile_ptgs_with_context(
+         FormulaExpr::Array(_)
+         | FormulaExpr::StructuredRef(_)
+         | FormulaExpr::ExternalRef(_)
++        | FormulaExpr::ExternalFunction { .. }
+         | FormulaExpr::Empty => {
+             return Err(UnsupportedToken);
+         }
+diff --git a/crates/duke-sheets-xlsb/src/biff12/compiler.rs b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
+index e185912..d57f4e3 100644
+--- a/crates/duke-sheets-xlsb/src/biff12/compiler.rs
++++ b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
+@@ -76,6 +76,10 @@ fn emit_expr(
+             log::warn!("external workbook reference compilation not supported, emitting #REF!");
+             emit_error(&CellError::Ref, out)
+         }
++        FormulaExpr::ExternalFunction { .. } => {
++            log::warn!("external add-in function compilation not supported, emitting #NAME?");
++            emit_error(&CellError::Name, out)
++        }
+     }
+ }
+ 
+diff --git a/crates/duke-sheets/src/calculation.rs b/crates/duke-sheets/src/calculation.rs
+index 9a6e884..6008b12 100644
+--- a/crates/duke-sheets/src/calculation.rs
++++ b/crates/duke-sheets/src/calculation.rs
+@@ -79,6 +79,11 @@ pub struct CalculationOptions {
+     ///
+     /// Returning `None` produces `#N/A`.
+     pub rtd_fn: Option<Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>>,
++    /// Optional callback for external add-in function calls, `[N]!Name(args)` (e.g. CCH `TBLink`,
++    /// `CLIENTNAME`, `cyedate`). Receives the verbatim function name and stringified args; returns
++    /// a typed value, or `None` to produce `#N/A`. Lets a host resolve add-in functions while the
++    /// formula text stays untouched.
++    pub external_fn: Option<Arc<dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync>>,
+ }
+ 
+ impl fmt::Debug for CalculationOptions {
+@@ -96,6 +101,10 @@ impl fmt::Debug for CalculationOptions {
+                 &self.web_service_fn.as_ref().map(|_| "<callback>"),
+             )
+             .field("rtd_fn", &self.rtd_fn.as_ref().map(|_| "<callback>"))
++            .field(
++                "external_fn",
++                &self.external_fn.as_ref().map(|_| "<callback>"),
++            )
+             .finish()
+     }
+ }
+@@ -112,6 +121,7 @@ impl Default for CalculationOptions {
+             max_threads: None,
+             web_service_fn: None,
+             rtd_fn: None,
++            external_fn: None,
+         }
+     }
+ }
+@@ -390,6 +400,11 @@ fn shift_formula_rows(expr: &mut FormulaExpr, row_delta: i32) {
+                 shift_formula_rows(arg, row_delta);
+             }
+         }
++        FormulaExpr::ExternalFunction { args, .. } => {
++            for arg in args {
++                shift_formula_rows(arg, row_delta);
++            }
++        }
+         FormulaExpr::Array(rows) => {
+             for row in rows {
+                 for cell in row {
+@@ -1239,6 +1254,7 @@ impl CalculationEngine {
+                 EvaluationContext::new(Some(wb_ref), cell_key.sheet, cell_key.row, cell_key.col);
+             ctx.web_service_fn = self.options.web_service_fn.as_deref();
+             ctx.rtd_fn = self.options.rtd_fn.as_deref();
++            ctx.external_fn = self.options.external_fn.as_deref();
+             ctx.image_sink = Some(&image_sink);
+             ctx.eval_cache = Some(eval_cache);
+ 
+@@ -1339,6 +1355,7 @@ impl CalculationEngine {
+             EvaluationContext::new(Some(workbook), cell_key.sheet, cell_key.row, cell_key.col);
+         ctx.web_service_fn = self.options.web_service_fn.as_deref();
+         ctx.rtd_fn = self.options.rtd_fn.as_deref();
++        ctx.external_fn = self.options.external_fn.as_deref();
+         ctx.image_sink = Some(&image_sink);
+         ctx.eval_cache = Some(eval_cache);
+         match evaluate(ast, &ctx) {
+@@ -1789,6 +1806,20 @@ fn extract_references_recursive(
+                 );
+             }
+         }
++        FormulaExpr::ExternalFunction { args, .. } => {
++            for arg in args {
++                extract_references_recursive(
++                    arg,
++                    current_sheet,
++                    workbook,
++                    formula_cells,
++                    formula_cell_index,
++                    range_dep_cache,
++                    value_sensitive_ranges,
++                    refs,
++                );
++            }
++        }
+         FormulaExpr::Array(rows) => {
+             for row in rows {
+                 for cell in row {
+@@ -1884,9 +1915,10 @@ fn collect_value_sensitive_ranges(
+         | FormulaExpr::Boolean(_)
+         | FormulaExpr::Error(_)
+         | FormulaExpr::Empty => true,
+-        FormulaExpr::NameRef(_) | FormulaExpr::ExternalRef(_) | FormulaExpr::StructuredRef(_) => {
+-            false
+-        }
++        FormulaExpr::NameRef(_)
++        | FormulaExpr::ExternalRef(_)
++        | FormulaExpr::ExternalFunction { .. }
++        | FormulaExpr::StructuredRef(_) => false,
+     }
+ }
+ 
+@@ -2011,6 +2043,11 @@ fn collect_input_ranges(
+                 collect_input_ranges(arg, current_sheet, workbook, formula_cells, ranges);
+             }
+         }
++        FormulaExpr::ExternalFunction { args, .. } => {
++            for arg in args {
++                collect_input_ranges(arg, current_sheet, workbook, formula_cells, ranges);
++            }
++        }
+         FormulaExpr::Array(rows) => {
+             for row in rows {
+                 for cell in row {
+@@ -2583,6 +2620,9 @@ fn contains_volatile_function(expr: &FormulaExpr) -> bool {
+             contains_volatile_function(left) || contains_volatile_function(right)
+         }
+         FormulaExpr::UnaryOp { operand, .. } => contains_volatile_function(operand),
++        // External add-in values (TBLink, etc.) are server-backed and can change between
++        // recalcs, so always treat them as volatile to keep them live.
++        FormulaExpr::ExternalFunction { .. } => true,
+         FormulaExpr::Array(rows) => rows
+             .iter()
+             .any(|row| row.iter().any(contains_volatile_function)),

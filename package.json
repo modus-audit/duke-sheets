@@ -1,0 +1,17 @@
+{
+  "name": "@dukelib/sheets-wasm",
+  "type": "module",
+  "description": "Modus fork of @dukelib/sheets-wasm: adds an externalFnFn host callback so the engine resolves [N]!FN(args) CCH add-in calls (TBLink/CLIENTNAME/...) against host-supplied values, keeping formula text pure. Built from SOURCE.patch against github.com/guseggert/duke-sheets. See beta/vendor/sheets-wasm/SOURCE.patch.",
+  "version": "0.1.14-modus.1",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "duke_sheets_wasm_bg.wasm",
+    "duke_sheets_wasm.js",
+    "duke_sheets_wasm.d.ts"
+  ],
+  "main": "duke_sheets_wasm.js",
+  "types": "duke_sheets_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
