@@ -142,6 +142,16 @@ fn test_excel_precision_preserves_non_cancelling_differences() {
         &ctx,
     )
     .unwrap();
+    let exact_integer_difference = evaluate(
+        &parse_formula("=4503599627370497-4503599627370496").unwrap(),
+        &ctx,
+    )
+    .unwrap();
+    let exact_integer_sum = evaluate(
+        &parse_formula("=4503599627370497+-4503599627370496").unwrap(),
+        &ctx,
+    )
+    .unwrap();
 
     let FormulaValue::Number(visible_precision) = visible_precision else {
         panic!("expected numeric result");
@@ -157,6 +167,8 @@ fn test_excel_precision_preserves_non_cancelling_differences() {
     assert_ne!(meaningful_difference, 0.0);
     assert_eq!(tiny_sum, 2e-20);
     assert_eq!(corrected_cancellation, FormulaValue::Number(0.0));
+    assert_eq!(exact_integer_difference, FormulaValue::Number(1.0));
+    assert_eq!(exact_integer_sum, FormulaValue::Number(1.0));
 }
 
 /// Test formula evaluation with range references

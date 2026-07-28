@@ -874,6 +874,7 @@ fn correct_cancellation(result: f64, left: f64, right: f64) -> f64 {
     if result != 0.0
         && result.is_finite()
         && operand_scale.is_finite()
+        && (left.fract() != 0.0 || right.fract() != 0.0)
         && result.abs() <= operand_scale * f64::EPSILON
     {
         0.0
