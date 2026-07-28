@@ -79,6 +79,98 @@ fn test_evaluate_with_cell_references() {
     assert_eq!(result, FormulaValue::Boolean(true));
 }
 
+#[test]
+fn test_excel_precision_cancels_bank_reconciliation_differences() {
+    let mut wb = Workbook::new();
+    {
+        let sheet = wb.worksheet_mut(0).unwrap();
+        let cases = [
+            (2_231_846.68, -1_084_381.76, 1_147_464.92),
+            (1_627_144.62, -19_623.98, 1_607_520.64),
+            (974_088.06, -55_324.24, 918_763.82),
+            (1_259_114.13, -235_621.58, 1_023_492.55),
+            (776_834.28, -35_579.47, 741_254.81),
+        ];
+
+        for (index, (bank_balance, outstanding_checks, book_balance)) in
+            cases.into_iter().enumerate()
+        {
+            let row = index + 1;
+            sheet
+                .set_cell_value(&format!("A{row}"), bank_balance)
+                .unwrap();
+            sheet
+                .set_cell_value(&format!("B{row}"), outstanding_checks)
+                .unwrap();
+            sheet
+                .set_cell_value(&format!("C{row}"), book_balance)
+                .unwrap();
+            sheet
+                .set_cell_formula(&format!("D{row}"), &format!("=A{row}+B{row}"))
+                .unwrap();
+            sheet
+                .set_cell_formula(&format!("E{row}"), &format!("=D{row}-C{row}"))
+                .unwrap();
+            sheet
+                .set_cell_formula(&format!("F{row}"), &format!("=E{row}=0"))
+                .unwrap();
+            sheet
+                .set_cell_formula(&format!("G{row}"), &format!("=E{row}+100"))
+                .unwrap();
+        }
+    }
+
+    wb.calculate().unwrap();
+
+    let sheet = wb.worksheet(0).unwrap();
+    for row in 0..5 {
+        assert_eq!(sheet.get_value_at(row, 4), CellValue::Number(0.0));
+        assert_eq!(sheet.get_value_at(row, 5), CellValue::Boolean(true));
+        assert_eq!(sheet.get_value_at(row, 6), CellValue::Number(100.0));
+    }
+}
+
+#[test]
+fn test_excel_precision_preserves_non_cancelling_differences() {
+    let ctx = EvaluationContext::simple();
+
+    let visible_precision = evaluate(&parse_formula("=(43.1-43.2)+1").unwrap(), &ctx).unwrap();
+    let meaningful_difference = evaluate(&parse_formula("=1.000000001-1").unwrap(), &ctx).unwrap();
+    let tiny_sum = evaluate(&parse_formula("=1E-20+1E-20").unwrap(), &ctx).unwrap();
+    let corrected_cancellation = evaluate(
+        &parse_formula("=1.333+1.225-1.333-1.225").unwrap(),
+        &ctx,
+    )
+    .unwrap();
+    let exact_integer_difference = evaluate(
+        &parse_formula("=4503599627370497-4503599627370496").unwrap(),
+        &ctx,
+    )
+    .unwrap();
+    let exact_integer_sum = evaluate(
+        &parse_formula("=4503599627370497+-4503599627370496").unwrap(),
+        &ctx,
+    )
+    .unwrap();
+
+    let FormulaValue::Number(visible_precision) = visible_precision else {
+        panic!("expected numeric result");
+    };
+    let FormulaValue::Number(meaningful_difference) = meaningful_difference else {
+        panic!("expected numeric result");
+    };
+    let FormulaValue::Number(tiny_sum) = tiny_sum else {
+        panic!("expected numeric result");
+    };
+
+    assert_eq!(visible_precision, 0.8999999999999986);
+    assert_ne!(meaningful_difference, 0.0);
+    assert_eq!(tiny_sum, 2e-20);
+    assert_eq!(corrected_cancellation, FormulaValue::Number(0.0));
+    assert_eq!(exact_integer_difference, FormulaValue::Number(1.0));
+    assert_eq!(exact_integer_sum, FormulaValue::Number(1.0));
+}
+
 /// Test formula evaluation with range references
 #[test]
 fn test_evaluate_with_range_references() {

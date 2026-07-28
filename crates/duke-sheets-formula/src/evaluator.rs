@@ -869,6 +869,20 @@ fn to_array(val: &FormulaValue) -> Vec<Vec<FormulaValue>> {
     }
 }
 
+fn correct_cancellation(result: f64, left: f64, right: f64) -> f64 {
+    let operand_scale = left.abs().max(right.abs());
+    if result != 0.0
+        && result.is_finite()
+        && operand_scale.is_finite()
+        && (left.fract() != 0.0 || right.fract() != 0.0)
+        && result.abs() <= operand_scale * f64::EPSILON
+    {
+        0.0
+    } else {
+        result
+    }
+}
+
 fn apply_scalar_binary_op(
     op: BinaryOperator,
     left_val: &FormulaValue,
@@ -891,7 +905,7 @@ fn apply_scalar_binary_op(
             let r = right_val
                 .as_number()
                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
-            Ok(FormulaValue::Number(l + r))
+            Ok(FormulaValue::Number(correct_cancellation(l + r, l, r)))
         }
         BinaryOperator::Subtract => {
             let l = left_val
@@ -900,7 +914,7 @@ fn apply_scalar_binary_op(
             let r = right_val
                 .as_number()
                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
-            Ok(FormulaValue::Number(l - r))
+            Ok(FormulaValue::Number(correct_cancellation(l - r, l, r)))
         }
         BinaryOperator::Multiply => {
             let l = left_val
