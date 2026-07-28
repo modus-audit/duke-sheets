@@ -86,7 +86,7 @@ index cf11f7a..5b12ba8 100644
      if value.is_null() || value.is_undefined() {
          Ok(CoreCellValue::Empty)
 diff --git a/crates/duke-sheets-formula/src/ast.rs b/crates/duke-sheets-formula/src/ast.rs
-index 2000191..42cd33f 100644
+index 1914444..89e2a73 100644
 --- a/crates/duke-sheets-formula/src/ast.rs
 +++ b/crates/duke-sheets-formula/src/ast.rs
 @@ -42,6 +42,18 @@ pub enum FormulaExpr {
@@ -109,7 +109,7 @@ index 2000191..42cd33f 100644
  
      /// Empty/omitted argument (e.g., the missing 4th arg in `XLOOKUP(x,a,b,,1)`)
 diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
-index 97f9703..a848266 100644
+index 3caea14..ee98808 100644
 --- a/crates/duke-sheets-formula/src/evaluator.rs
 +++ b/crates/duke-sheets-formula/src/evaluator.rs
 @@ -188,6 +188,11 @@ pub struct EvaluationContext<'a> {
@@ -151,7 +151,7 @@ index 97f9703..a848266 100644
          FormulaExpr::Array(rows) => {
              let mut result_rows = Vec::new();
              for row in rows {
-@@ -2093,6 +2104,56 @@ fn evaluate_vlookup_fast(
+@@ -2122,6 +2133,56 @@ fn evaluate_vlookup_fast(
  }
  
  /// Evaluate a function call
@@ -209,10 +209,10 @@ index 97f9703..a848266 100644
      name: &str,
      args: &[FormulaExpr],
 diff --git a/crates/duke-sheets-formula/src/parser.rs b/crates/duke-sheets-formula/src/parser.rs
-index 2634cd8..2677317 100644
+index de2fd91..807aaab 100644
 --- a/crates/duke-sheets-formula/src/parser.rs
 +++ b/crates/duke-sheets-formula/src/parser.rs
-@@ -874,11 +874,20 @@ impl<'a> FormulaParser<'a> {
+@@ -1003,11 +1003,20 @@ impl<'a> FormulaParser<'a> {
      }
  
      fn parse_function_call(&mut self, name: String) -> FormulaResult<FormulaExpr> {
@@ -234,7 +234,7 @@ index 2634cd8..2677317 100644
          if !matches!(self.current_token(), Token::RightParen) {
              // First argument: empty if immediately followed by comma
              if matches!(self.current_token(), Token::Comma) {
-@@ -899,11 +908,7 @@ impl<'a> FormulaParser<'a> {
+@@ -1028,11 +1037,7 @@ impl<'a> FormulaParser<'a> {
          }
  
          self.expect(&Token::RightParen)?;
@@ -247,7 +247,7 @@ index 2634cd8..2677317 100644
      }
  
      fn parse_sheet_reference(&mut self, sheet: String) -> FormulaResult<FormulaExpr> {
-@@ -977,6 +982,32 @@ impl<'a> FormulaParser<'a> {
+@@ -1106,6 +1111,32 @@ impl<'a> FormulaParser<'a> {
                  // Named range in external workbook
                  Ok(FormulaExpr::NameRef(format!("[{}]{}", content, name)))
              }
@@ -281,22 +281,47 @@ index 2634cd8..2677317 100644
                  // Not followed by a reference - unqualified structured ref
                  self.parse_structured_ref_content(None, &content)
 diff --git a/crates/duke-sheets-xls/src/writer.rs b/crates/duke-sheets-xls/src/writer.rs
-index 381a937..b706ce6 100644
+index f28b248..b1e8ec4 100644
 --- a/crates/duke-sheets-xls/src/writer.rs
 +++ b/crates/duke-sheets-xls/src/writer.rs
-@@ -2906,6 +2906,7 @@ fn compile_ptgs_with_context(
-         FormulaExpr::Array(_)
-         | FormulaExpr::StructuredRef(_)
-         | FormulaExpr::ExternalRef(_)
+@@ -2036,6 +2036,11 @@ fn collect_addin_names_expr(
+                 collect_addin_names_expr(arg, out);
+             }
+         }
++        FormulaExpr::ExternalFunction { args, .. } => {
++            for arg in args {
++                collect_addin_names_expr(arg, out);
++            }
++        }
+         FormulaExpr::BinaryOp { left, right, .. } => {
+             collect_addin_names_expr(left, out);
+             collect_addin_names_expr(right, out);
+@@ -2107,7 +2112,7 @@ fn collect_formula_expr_sheet_names(
+             collect_formula_expr_sheet_names(right, out);
+         }
+         FormulaExpr::UnaryOp { operand, .. } => collect_formula_expr_sheet_names(operand, out),
+-        FormulaExpr::Function { args, .. } => {
++        FormulaExpr::Function { args, .. } | FormulaExpr::ExternalFunction { args, .. } => {
+             for arg in args {
+                 collect_formula_expr_sheet_names(arg, out);
+             }
+@@ -3469,7 +3474,10 @@ fn compile_ptgs_with_context(
+         FormulaExpr::Array(rows) => {
+             emit_array_constant(rows, out, extra)?;
+         }
+-        FormulaExpr::StructuredRef(_) | FormulaExpr::ExternalRef(_) | FormulaExpr::Empty => {
++        FormulaExpr::StructuredRef(_)
++        | FormulaExpr::ExternalRef(_)
 +        | FormulaExpr::ExternalFunction { .. }
-         | FormulaExpr::Empty => {
++        | FormulaExpr::Empty => {
              return Err(UnsupportedToken);
          }
+     }
 diff --git a/crates/duke-sheets-xlsb/src/biff12/compiler.rs b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
-index e185912..d57f4e3 100644
+index 39223c8..4a77a35 100644
 --- a/crates/duke-sheets-xlsb/src/biff12/compiler.rs
 +++ b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
-@@ -76,6 +76,10 @@ fn emit_expr(
+@@ -172,6 +172,10 @@ fn emit_expr(
              log::warn!("external workbook reference compilation not supported, emitting #REF!");
              emit_error(&CellError::Ref, out)
          }

@@ -5,5 +5,5 @@ It adds an `externalFnFn(name, args) -> value | null` host callback so the engin
 `[N]!FN(args)` CCH add-in calls (TBLink/CLIENTNAME/…) during `calculate()`, keeping formula text
 pure. With no callback (or a declined call) it returns the cell's cached value (strict superset).
 
-Source of the change: `SOURCE.patch` (apply to the fork's `main`). Rebuild:
+Source of the Modus-specific change: `SOURCE.patch`, generated from `main...modus-tb`. Rebuild with
 `wasm-pack build --release --target web` in `bindings/wasm`. Consumed via tag `wasm-dist-<ver>`.
