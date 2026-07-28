@@ -2036,6 +2036,11 @@ fn collect_addin_names_expr(
                 collect_addin_names_expr(arg, out);
             }
         }
+        FormulaExpr::ExternalFunction { args, .. } => {
+            for arg in args {
+                collect_addin_names_expr(arg, out);
+            }
+        }
         FormulaExpr::BinaryOp { left, right, .. } => {
             collect_addin_names_expr(left, out);
             collect_addin_names_expr(right, out);
@@ -2107,7 +2112,7 @@ fn collect_formula_expr_sheet_names(
             collect_formula_expr_sheet_names(right, out);
         }
         FormulaExpr::UnaryOp { operand, .. } => collect_formula_expr_sheet_names(operand, out),
-        FormulaExpr::Function { args, .. } => {
+        FormulaExpr::Function { args, .. } | FormulaExpr::ExternalFunction { args, .. } => {
             for arg in args {
                 collect_formula_expr_sheet_names(arg, out);
             }
