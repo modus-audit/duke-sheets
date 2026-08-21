@@ -53,13 +53,15 @@ pub fn format_code_from_id(id: u32) -> Option<&'static str> {
         38 => Some("#,##0 ;[Red](#,##0)"),
         39 => Some("#,##0.00;(#,##0.00)"),
         40 => Some("#,##0.00;[Red](#,##0.00)"),
+        41 => Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)"),
+        42 => Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)"),
+        43 => Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)"),
+        44 => Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)"),
         45 => Some("mm:ss"),
         46 => Some("[h]:mm:ss"),
         47 => Some("mmss.0"),
         48 => Some("##0.0E+0"),
         49 => Some("@"),
-        // Note: IDs 5-8, 23-36, 41-44, 50+ are not defined as built-in formats
-        // Custom formats typically start at 164
         _ => None,
     }
 }
@@ -132,6 +134,22 @@ mod tests {
         assert_eq!(format_code_from_id(38), Some("#,##0 ;[Red](#,##0)"));
         assert_eq!(format_code_from_id(39), Some("#,##0.00;(#,##0.00)"));
         assert_eq!(format_code_from_id(40), Some("#,##0.00;[Red](#,##0.00)"));
+        assert_eq!(
+            format_code_from_id(41),
+            Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
+        );
+        assert_eq!(
+            format_code_from_id(42),
+            Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
+        );
+        assert_eq!(
+            format_code_from_id(43),
+            Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
+        );
+        assert_eq!(
+            format_code_from_id(44),
+            Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
+        );
     }
 
     #[test]

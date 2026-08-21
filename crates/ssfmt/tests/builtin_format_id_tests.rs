@@ -128,7 +128,7 @@ fn test_invalid_format_ids() {
 fn test_all_defined_format_ids() {
     let defined_ids = vec![
         0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-        37, 38, 39, 40, 45, 46, 47, 48, 49,
+        37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
     ];
 
     for id in defined_ids {
@@ -153,4 +153,21 @@ fn test_accounting_formats() {
     // Negative with red color
     let code = format_code_from_id(38).unwrap();
     assert_eq!(code, "#,##0 ;[Red](#,##0)");
+
+    assert_eq!(
+        format_code_from_id(41),
+        Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(42),
+        Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(43),
+        Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(44),
+        Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
+    );
 }
