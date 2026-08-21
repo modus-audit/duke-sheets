@@ -5,7 +5,7 @@ index cf11f7a..5b12ba8 100644
 @@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
  use wasm_bindgen::prelude::*;
  use wasm_bindgen::JsCast;
- 
+
 -use duke_sheets::{CalculationOptions, WorkbookCalculationExt};
 +use duke_sheets::{CalculationOptions, FormulaValue, WorkbookCalculationExt};
  use duke_sheets_core::{
@@ -14,7 +14,7 @@ index cf11f7a..5b12ba8 100644
 @@ -134,6 +134,10 @@ impl SendSyncFunction {
          self.0.call1(this, arg)
      }
- 
+
 +    fn call2(&self, this: &JsValue, arg1: &JsValue, arg2: &JsValue) -> Result<JsValue, JsValue> {
 +        self.0.call2(this, arg1, arg2)
 +    }
@@ -29,13 +29,13 @@ index cf11f7a..5b12ba8 100644
 +            let external_js_fn = js_sys::Reflect::get(&options, &JsValue::from_str("externalFnFn"))
 +                .ok()
 +                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
- 
+
              let js_opts: JsCalculationOptions =
                  serde_wasm_bindgen::from_value(options).map_err(to_js_error)?;
 @@ -708,6 +715,21 @@ impl Workbook {
                      as Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>
              });
- 
+
 +            // Build external_fn from callback: externalFnFn(name, args[]) -> number|string|bool|null
 +            let external_fn = external_js_fn.map(|js_fn| {
 +                let wrapper = SendSyncFunction(js_fn);
@@ -65,7 +65,7 @@ index cf11f7a..5b12ba8 100644
 @@ -745,6 +768,22 @@ impl Default for Workbook {
      }
  }
- 
+
 +/// Convert a JS value returned by an `externalFnFn` callback into a typed FormulaValue.
 +/// `null`/`undefined` -> `None` (yields `#N/A`). Booleans take priority over numbers.
 +fn js_value_to_formula_value(value: JsValue) -> Option<FormulaValue> {
@@ -85,6 +85,53 @@ index cf11f7a..5b12ba8 100644
  fn js_to_cell_value(value: JsValue) -> Result<CoreCellValue, JsError> {
      if value.is_null() || value.is_undefined() {
          Ok(CoreCellValue::Empty)
+diff --git a/crates/duke-sheets-core/src/cell/view.rs b/crates/duke-sheets-core/src/cell/view.rs
+index f6f8d09..3d15890 100644
+--- a/crates/duke-sheets-core/src/cell/view.rs
++++ b/crates/duke-sheets-core/src/cell/view.rs
+@@ -653,6 +653,16 @@ mod tests {
+         );
+     }
+
++    #[test]
++    fn builtin_accounting_decimal() {
++        let result = fmt(
++            &CellValue::Number(29081.0),
++            &NumberFormat::BuiltIn(43),
++            false,
++        );
++        assert_eq!(result, " 29,081.00 ");
++    }
++
+     // Edge cases
+
+     #[test]
+diff --git a/crates/duke-sheets-core/src/style/number_format.rs b/crates/duke-sheets-core/src/style/number_format.rs
+index df7e64a..135ab58 100644
+--- a/crates/duke-sheets-core/src/style/number_format.rs
++++ b/crates/duke-sheets-core/src/style/number_format.rs
+@@ -65,6 +65,10 @@ impl NumberFormat {
+     pub const ID_ACCOUNTING_DEC2: u32 = 39;
+     /// 40 - #,##0.00;[Red](#,##0.00)
+     pub const ID_ACCOUNTING_DEC2_RED: u32 = 40;
++    pub const ID_ACCOUNTING_PADDED_INT: u32 = 41;
++    pub const ID_ACCOUNTING_DOLLAR_INT: u32 = 42;
++    pub const ID_ACCOUNTING_PADDED_DEC2: u32 = 43;
++    pub const ID_ACCOUNTING_DOLLAR_DEC2: u32 = 44;
+     /// 49 - @
+     pub const ID_TEXT: u32 = 49;
+
+@@ -175,6 +179,10 @@ impl NumberFormat {
+             38 => "#,##0_);[Red](#,##0)",
+             39 => "#,##0.00_);(#,##0.00)",
+             40 => "#,##0.00_);[Red](#,##0.00)",
++            41 => "_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)",
++            42 => "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)",
++            43 => "_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)",
++            44 => "_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)",
+             45 => "mm:ss",
+             46 => "[h]:mm:ss",
+             47 => "mm:ss.0",
 diff --git a/crates/duke-sheets-formula/src/ast.rs b/crates/duke-sheets-formula/src/ast.rs
 index 1914444..89e2a73 100644
 --- a/crates/duke-sheets-formula/src/ast.rs
@@ -92,7 +139,7 @@ index 1914444..89e2a73 100644
 @@ -42,6 +42,18 @@ pub enum FormulaExpr {
          args: Vec<FormulaExpr>,
      },
- 
+
 +    /// External add-in function call, e.g. `[1]!TBLink("Consolidated","CONSUL[3]",...)`.
 +    /// `book` is the external-workbook index/name between the brackets (`"1"`); `name` keeps
 +    /// the add-in function name verbatim (case preserved — e.g. `TBLink`, `cyedate`).
@@ -106,7 +153,7 @@ index 1914444..89e2a73 100644
 +    },
 +
      Array(Vec<Vec<FormulaExpr>>),
- 
+
      /// Empty/omitted argument (e.g., the missing 4th arg in `XLOOKUP(x,a,b,,1)`)
 diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
 index 3caea14..ee98808 100644
@@ -141,9 +188,9 @@ index 3caea14..ee98808 100644
              eval_cache: None,
          }
 @@ -796,6 +803,10 @@ pub fn evaluate(expr: &FormulaExpr, ctx: &EvaluationContext) -> FormulaResult<Fo
- 
+
          FormulaExpr::Function { name, args } => evaluate_function(name, args, ctx),
- 
+
 +        FormulaExpr::ExternalFunction { name, args, .. } => {
 +            evaluate_external_function(name, args, ctx)
 +        }
@@ -153,7 +200,7 @@ index 3caea14..ee98808 100644
              for row in rows {
 @@ -2122,6 +2133,56 @@ fn evaluate_vlookup_fast(
  }
- 
+
  /// Evaluate a function call
 +/// Evaluate an external add-in function call (`[N]!Name(args)`) by delegating to the host's
 +/// `external_fn` callback. Args are evaluated then stringified (CCH add-in args are string/number
@@ -214,7 +261,7 @@ index de2fd91..807aaab 100644
 +++ b/crates/duke-sheets-formula/src/parser.rs
 @@ -1003,11 +1003,20 @@ impl<'a> FormulaParser<'a> {
      }
- 
+
      fn parse_function_call(&mut self, name: String) -> FormulaResult<FormulaExpr> {
 +        let args = self.parse_call_args()?;
 +        Ok(FormulaExpr::Function {
@@ -227,16 +274,16 @@ index de2fd91..807aaab 100644
 +    /// e.g. `XLOOKUP(x,a,b,,1)`). Assumes the next token is `(`.
 +    fn parse_call_args(&mut self) -> FormulaResult<Vec<FormulaExpr>> {
          self.expect(&Token::LeftParen)?;
- 
+
          let mut args = Vec::new();
- 
+
 -        // Parse arguments, supporting empty/omitted args (e.g., XLOOKUP(x,a,b,,1))
          if !matches!(self.current_token(), Token::RightParen) {
              // First argument: empty if immediately followed by comma
              if matches!(self.current_token(), Token::Comma) {
 @@ -1028,11 +1037,7 @@ impl<'a> FormulaParser<'a> {
          }
- 
+
          self.expect(&Token::RightParen)?;
 -
 -        Ok(FormulaExpr::Function {
@@ -245,7 +292,7 @@ index de2fd91..807aaab 100644
 -        })
 +        Ok(args)
      }
- 
+
      fn parse_sheet_reference(&mut self, sheet: String) -> FormulaResult<FormulaExpr> {
 @@ -1106,6 +1111,32 @@ impl<'a> FormulaParser<'a> {
                  // Named range in external workbook
@@ -331,7 +378,21 @@ index 39223c8..4a77a35 100644
 +        }
      }
  }
- 
+
+diff --git a/crates/duke-sheets/examples/profile_calc.rs b/crates/duke-sheets/examples/profile_calc.rs
+index 87667ad..0e4b3a5 100644
+--- a/crates/duke-sheets/examples/profile_calc.rs
++++ b/crates/duke-sheets/examples/profile_calc.rs
+@@ -182,7 +182,8 @@ impl<'a> ParallelAnalyzer<'a> {
+             FormulaExpr::UnaryOp { operand, .. } => {
+                 self.extract_refs_from_expr(operand, current_sheet, refs);
+             }
+-            FormulaExpr::Function { args, .. } => {
++            FormulaExpr::Function { args, .. }
++            | FormulaExpr::ExternalFunction { args, .. } => {
+                 for arg in args {
+                     self.extract_refs_from_expr(arg, current_sheet, refs);
+                 }
 diff --git a/crates/duke-sheets/src/calculation.rs b/crates/duke-sheets/src/calculation.rs
 index 9a6e884..6008b12 100644
 --- a/crates/duke-sheets/src/calculation.rs
@@ -346,7 +407,7 @@ index 9a6e884..6008b12 100644
 +    /// formula text stays untouched.
 +    pub external_fn: Option<Arc<dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync>>,
  }
- 
+
  impl fmt::Debug for CalculationOptions {
 @@ -96,6 +101,10 @@ impl fmt::Debug for CalculationOptions {
                  &self.web_service_fn.as_ref().map(|_| "<callback>"),
@@ -386,7 +447,7 @@ index 9a6e884..6008b12 100644
 +            ctx.external_fn = self.options.external_fn.as_deref();
              ctx.image_sink = Some(&image_sink);
              ctx.eval_cache = Some(eval_cache);
- 
+
 @@ -1339,6 +1355,7 @@ impl CalculationEngine {
              EvaluationContext::new(Some(workbook), cell_key.sheet, cell_key.row, cell_key.col);
          ctx.web_service_fn = self.options.web_service_fn.as_deref();
@@ -429,7 +490,7 @@ index 9a6e884..6008b12 100644
 +        | FormulaExpr::StructuredRef(_) => false,
      }
  }
- 
+
 @@ -2011,6 +2043,11 @@ fn collect_input_ranges(
                  collect_input_ranges(arg, current_sheet, workbook, formula_cells, ranges);
              }
@@ -452,3 +513,83 @@ index 9a6e884..6008b12 100644
          FormulaExpr::Array(rows) => rows
              .iter()
              .any(|row| row.iter().any(contains_volatile_function)),
+diff --git a/crates/ssfmt/src/builtin_formats.rs b/crates/ssfmt/src/builtin_formats.rs
+index 263f22f..63f5b0c 100644
+--- a/crates/ssfmt/src/builtin_formats.rs
++++ b/crates/ssfmt/src/builtin_formats.rs
+@@ -53,13 +53,15 @@ pub fn format_code_from_id(id: u32) -> Option<&'static str> {
+         38 => Some("#,##0 ;[Red](#,##0)"),
+         39 => Some("#,##0.00;(#,##0.00)"),
+         40 => Some("#,##0.00;[Red](#,##0.00)"),
++        41 => Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)"),
++        42 => Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)"),
++        43 => Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)"),
++        44 => Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)"),
+         45 => Some("mm:ss"),
+         46 => Some("[h]:mm:ss"),
+         47 => Some("mmss.0"),
+         48 => Some("##0.0E+0"),
+         49 => Some("@"),
+-        // Note: IDs 5-8, 23-36, 41-44, 50+ are not defined as built-in formats
+-        // Custom formats typically start at 164
+         _ => None,
+     }
+ }
+@@ -132,6 +134,22 @@ mod tests {
+         assert_eq!(format_code_from_id(38), Some("#,##0 ;[Red](#,##0)"));
+         assert_eq!(format_code_from_id(39), Some("#,##0.00;(#,##0.00)"));
+         assert_eq!(format_code_from_id(40), Some("#,##0.00;[Red](#,##0.00)"));
++        assert_eq!(
++            format_code_from_id(41),
++            Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(42),
++            Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(43),
++            Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(44),
++            Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
++        );
+     }
+
+     #[test]
+diff --git a/crates/ssfmt/tests/builtin_format_id_tests.rs b/crates/ssfmt/tests/builtin_format_id_tests.rs
+index e753a04..af26268 100644
+--- a/crates/ssfmt/tests/builtin_format_id_tests.rs
++++ b/crates/ssfmt/tests/builtin_format_id_tests.rs
+@@ -128,7 +128,7 @@ fn test_invalid_format_ids() {
+ fn test_all_defined_format_ids() {
+     let defined_ids = vec![
+         0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+-        37, 38, 39, 40, 45, 46, 47, 48, 49,
++        37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+     ];
+
+     for id in defined_ids {
+@@ -153,4 +153,21 @@ fn test_accounting_formats() {
+     // Negative with red color
+     let code = format_code_from_id(38).unwrap();
+     assert_eq!(code, "#,##0 ;[Red](#,##0)");
++
++    assert_eq!(
++        format_code_from_id(41),
++        Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(42),
++        Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(43),
++        Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(44),
++        Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
++    );
+ }
