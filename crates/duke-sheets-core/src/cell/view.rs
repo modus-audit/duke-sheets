@@ -653,6 +653,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builtin_accounting_decimal() {
+        let result = fmt(
+            &CellValue::Number(29081.0),
+            &NumberFormat::BuiltIn(43),
+            false,
+        );
+        assert_eq!(result, " 29,081.00 ");
+    }
+
     // Edge cases
 
     #[test]

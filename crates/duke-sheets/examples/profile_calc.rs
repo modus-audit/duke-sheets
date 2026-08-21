@@ -182,7 +182,8 @@ impl<'a> ParallelAnalyzer<'a> {
             FormulaExpr::UnaryOp { operand, .. } => {
                 self.extract_refs_from_expr(operand, current_sheet, refs);
             }
-            FormulaExpr::Function { args, .. } => {
+            FormulaExpr::Function { args, .. }
+            | FormulaExpr::ExternalFunction { args, .. } => {
                 for arg in args {
                     self.extract_refs_from_expr(arg, current_sheet, refs);
                 }
