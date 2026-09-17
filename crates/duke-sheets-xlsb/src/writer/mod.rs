@@ -9,7 +9,7 @@ mod vml;
 mod workbook;
 mod worksheet;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Seek, Write};
 use std::path::Path;
 
@@ -132,6 +132,13 @@ impl XlsbWriter {
         });
 
         let xlfn_names = collect_xlfn_names(workbook);
+        let external_name_list = collect_external_addin_names(workbook);
+        let external_names: HashMap<String, u32> = external_name_list
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.to_ascii_uppercase(), (idx + 1) as u32))
+            .collect();
+        let external_ixti = (!external_names.is_empty()).then_some(0u16);
 
         // Names emitted to BrtName must be enumerable from the
         // CompileContext so PtgName can resolve text → ilbl. The list
@@ -143,6 +150,8 @@ impl XlsbWriter {
             xlfn_names: xlfn_names.clone(),
             defined_names: Vec::new(),
             defined_name_classes: Vec::new(),
+            external_names: external_names.clone(),
+            external_ixti,
         };
         let mut defined_names: Vec<String> = Vec::new();
         // Body class per name: range-bodied names must keep R-class
@@ -164,7 +173,14 @@ impl XlsbWriter {
         Self::write_root_rels(&mut zip, &options)?;
         Self::write_workbook_rels(&mut zip, &options, workbook, &sst)?;
         Self::write_doc_props(&mut zip, &options)?;
-        workbook::write_workbook(&mut zip, &options, workbook, has_formulas, &xlfn_names)?;
+        workbook::write_workbook(
+            &mut zip,
+            &options,
+            workbook,
+            has_formulas,
+            &xlfn_names,
+            &external_name_list,
+        )?;
         let (style_mapping, rich_font_ids, dxf_mapping) =
             styles::write_styles(&mut zip, &options, workbook, &sst.rich_fonts)?;
         shared_strings::write_sst(&mut zip, &options, &sst, &rich_font_ids)?;
@@ -172,6 +188,32 @@ impl XlsbWriter {
 
         let mut comment_sheet_indices = Vec::new();
         let mut all_drawing_overrides: Vec<(String, String)> = Vec::new();
+        let mut media_default_exts: BTreeSet<String> = BTreeSet::new();
+        let mut written_media: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // A preserved part keeps the path its own relationship names, so
+        // everything the writer numbers itself starts above whatever
+        // those have already claimed, or the two collide on one path.
+        let mut claimed = drawing::ClaimedPartNumbers::default();
+        for i in 0..workbook.sheet_count() {
+            let ws = workbook.worksheet(i).unwrap();
+            for rel in drawing::sheet_raw_rels(ws) {
+                if rel.external || rel.part.is_none() {
+                    continue;
+                }
+                claimed.note(&drawing::resolve_rel_target("xl/drawings", &rel.target));
+            }
+        }
+        let mut next_drawing_num = claimed.drawing + 1;
+        let mut next_chart_num = claimed.chart + 1;
+        let mut next_chartex_num = claimed.chart_ex + 1;
+        let mut next_image_num = claimed.image + 1;
+        let total_standard_charts: usize = claimed.style.max(
+            (0..workbook.sheet_count())
+                .filter_map(|i| workbook.worksheet(i))
+                .map(|ws| drawing::sheet_charts(ws).len())
+                .sum(),
+        );
 
         let mut global_table_num = 1usize;
         let mut table_global_nums: Vec<Vec<usize>> = Vec::new();
@@ -193,11 +235,12 @@ impl XlsbWriter {
                 xlfn_names: xlfn_names.clone(),
                 defined_names: defined_names.clone(),
                 defined_name_classes: defined_name_classes.clone(),
+                external_names: external_names.clone(),
+                external_ixti,
             };
 
-            let has_raw_drawing = !ws.raw_drawing_objects.is_empty();
-            let has_charts = !ws.charts().is_empty() || !ws.charts_ex().is_empty();
-            let emit_brt_drawing = has_charts;
+            let has_drawing = drawing::sheet_has_drawing_content(ws);
+            let emit_brt_drawing = has_drawing;
 
             let mut result = worksheet::write_worksheet(
                 &mut zip,
@@ -227,10 +270,28 @@ impl XlsbWriter {
                 });
             }
 
-            let drawing_result = if has_raw_drawing || has_charts {
-                let dr =
-                    drawing::write_drawing_parts(&mut zip, &options, &ws.raw_drawing_objects, i)?;
+            let drawing_result = if has_drawing {
+                let numbering = drawing::DrawingNumbering {
+                    drawing_num: next_drawing_num,
+                    chart_start: next_chart_num,
+                    chartex_start: next_chartex_num,
+                    image_start: next_image_num,
+                    total_standard_charts,
+                };
+                next_drawing_num += 1;
+                next_chart_num += drawing::sheet_charts(ws).len();
+                next_chartex_num += ws.chart_ex_count();
+                next_image_num += drawing::sheet_image_payloads(ws).len();
+                let dr = drawing::write_drawing_parts(
+                    &mut zip,
+                    &options,
+                    ws,
+                    i,
+                    &numbering,
+                    &mut written_media,
+                )?;
                 all_drawing_overrides.extend(dr.content_type_overrides.iter().cloned());
+                media_default_exts.extend(dr.media_default_exts.iter().cloned());
                 Some(dr)
             } else {
                 None
@@ -241,14 +302,12 @@ impl XlsbWriter {
                 .and_then(|dr| dr.drawing_path.as_ref())
                 .is_some();
 
-            let has_vml = if result.has_comments {
+            if result.has_comments {
                 comments::write_comments(&mut zip, &options, i, ws)?;
-                let wrote_vml = vml::write_comment_vml(&mut zip, &options, i, ws)?;
                 comment_sheet_indices.push(i);
-                wrote_vml
-            } else {
-                false
-            };
+            }
+            let has_vml =
+                vml::write_legacy_vml(&mut zip, &options, i, ws, &workbook.theme_palette())?;
 
             if !result.sheet_rels.is_empty() || result.has_comments || has_drawing_rel || has_vml {
                 let drawing_path = drawing_result
@@ -272,6 +331,7 @@ impl XlsbWriter {
             workbook,
             &comment_sheet_indices,
             &all_drawing_overrides,
+            &media_default_exts,
             &table_global_nums,
         )?;
 
@@ -279,12 +339,14 @@ impl XlsbWriter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_content_types<W: Write + Seek>(
         zip: &mut ZipWriter<W>,
         options: &SimpleFileOptions,
         workbook: &Workbook,
         comment_sheets: &[usize],
         drawing_overrides: &[(String, String)],
+        media_default_exts: &BTreeSet<String>,
         table_global_nums: &[Vec<usize>],
     ) -> XlsbResult<()> {
         zip.start_file("[Content_Types].xml", *options)?;
@@ -321,20 +383,26 @@ impl XlsbWriter {
                 ));
             }
         }
-        let mut has_media_default = false;
+        // One Override per part, compared without case as OPC does; a
+        // part reached from two sheets is still one part.
+        let mut seen_overrides = std::collections::HashSet::new();
         for (part_name, ct) in drawing_overrides {
+            if !seen_overrides.insert(part_name.to_ascii_lowercase()) {
+                continue;
+            }
             xml.push_str(&format!(
                 "<Override PartName=\"{}\" ContentType=\"{}\"/>",
                 part_name, ct
             ));
-            if part_name.contains("/media/") {
-                has_media_default = true;
-            }
         }
-        if has_media_default || drawing_overrides.iter().any(|(p, _)| p.contains("/media/")) {
-            xml.push_str("<Default Extension=\"png\" ContentType=\"image/png\"/>");
-            xml.push_str("<Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/>");
-            xml.push_str("<Default Extension=\"emf\" ContentType=\"image/x-emf\"/>");
+        for ext in media_default_exts {
+            let mime = duke_sheets_chart::ImageFormat::from_extension(ext)
+                .map(duke_sheets_chart::drawing_part::image_format_mime)
+                .unwrap_or("application/octet-stream");
+            xml.push_str(&format!(
+                "<Default Extension=\"{}\" ContentType=\"{}\"/>",
+                ext, mime
+            ));
         }
         xml.push_str("</Types>");
         zip.write_all(xml.as_bytes())?;
@@ -580,6 +648,62 @@ fn collect_xlfn_from_expr(expr: &FormulaExpr, names: &mut BTreeSet<String>) {
             for row in rows {
                 for cell in row {
                     collect_xlfn_from_expr(cell, names);
+                }
+            }
+        }
+        FormulaExpr::ExternalFunction { args, .. } => {
+            for arg in args {
+                collect_xlfn_from_expr(arg, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_external_addin_names(workbook: &Workbook) -> Vec<String> {
+    let mut names = BTreeMap::new();
+    for i in 0..workbook.sheet_count() {
+        let ws = workbook.worksheet(i).unwrap();
+        for (r, c, _) in ws.iter_cells() {
+            if let Some(fd) = ws.formula_data_at(r, c) {
+                let text = if fd.text.starts_with('=') {
+                    fd.text.clone()
+                } else {
+                    format!("={}", fd.text)
+                };
+                if let Ok(expr) = parse_formula(&text) {
+                    collect_external_addin_names_expr(&expr, &mut names);
+                }
+            }
+        }
+    }
+    names.into_values().collect()
+}
+
+fn collect_external_addin_names_expr(expr: &FormulaExpr, names: &mut BTreeMap<String, String>) {
+    match expr {
+        FormulaExpr::ExternalFunction { name, args, .. } => {
+            names
+                .entry(name.to_ascii_uppercase())
+                .or_insert_with(|| name.clone());
+            for arg in args {
+                collect_external_addin_names_expr(arg, names);
+            }
+        }
+        FormulaExpr::Function { args, .. } => {
+            for arg in args {
+                collect_external_addin_names_expr(arg, names);
+            }
+        }
+        FormulaExpr::BinaryOp { left, right, .. } => {
+            collect_external_addin_names_expr(left, names);
+            collect_external_addin_names_expr(right, names);
+        }
+        FormulaExpr::UnaryOp { operand, .. } => collect_external_addin_names_expr(operand, names),
+        FormulaExpr::Array(rows) => {
+            for row in rows {
+                for cell in row {
+                    collect_external_addin_names_expr(cell, names);
                 }
             }
         }

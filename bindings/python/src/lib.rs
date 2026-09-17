@@ -11,11 +11,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use duke_sheets::prelude::*;
-use duke_sheets::{CalculationOptions, ImageSizing, WorkbookCalculationExt};
+use duke_sheets::{CalculationOptions, FormulaValue, ImageSizing, WorkbookCalculationExt};
 use duke_sheets_core::{CellError, CellValue as CoreCellValue};
 
 mod types;
 pub use types::*;
+mod drawings;
+pub use drawings::*;
 mod workbook_read;
 mod worksheet_read;
 pub use worksheet_read::PyRowIterator;
@@ -352,6 +354,88 @@ impl PyWorksheet {
         ws.set_cell_formula(address, formula).map_err(to_py_err)
     }
 
+    /// Set or update a cell style by address.
+    ///
+    /// Accepts either a Style object returned by get_cell_style() or a dict patch.
+    #[pyo3(signature = (address, style))]
+    fn set_cell_style(&self, address: &str, style: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.workbook.write().map_err(to_py_err)?;
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| PyIndexError::new_err("Worksheet no longer exists"))?;
+
+        let addr = duke_sheets_core::CellAddress::parse(address)
+            .map_err(|e| PyValueError::new_err(format!("Invalid cell address: {}", e)))?;
+        let mut core_style = ws
+            .cell_style_at(addr.row, addr.col)
+            .cloned()
+            .unwrap_or_default();
+        types::apply_style_input_to_core(style, &mut core_style)?;
+        ws.set_cell_style_at(addr.row, addr.col, &core_style)
+            .map_err(to_py_err)
+    }
+
+    /// Set or update a cell style by row/col (0-based).
+    #[pyo3(signature = (row, col, style))]
+    fn set_cell_style_at(&self, row: u32, col: u32, style: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.workbook.write().map_err(to_py_err)?;
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| PyIndexError::new_err("Worksheet no longer exists"))?;
+
+        let mut core_style = ws
+            .cell_style_at(row, col as u16)
+            .cloned()
+            .unwrap_or_default();
+        types::apply_style_input_to_core(style, &mut core_style)?;
+        ws.set_cell_style_at(row, col as u16, &core_style)
+            .map_err(to_py_err)
+    }
+
+    /// Set or update the style for all cells in a range (e.g. "A1:C3").
+    #[pyo3(signature = (range_str, style))]
+    fn set_range_style(&self, range_str: &str, style: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.workbook.write().map_err(to_py_err)?;
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| PyIndexError::new_err("Worksheet no longer exists"))?;
+
+        let range = duke_sheets_core::CellRange::parse(range_str)
+            .map_err(|e| PyValueError::new_err(format!("Invalid range: {}", e)))?;
+        for addr in range.cells() {
+            let mut core_style = ws
+                .cell_style_at(addr.row, addr.col)
+                .cloned()
+                .unwrap_or_default();
+            types::apply_style_input_to_core(style, &mut core_style)?;
+            ws.set_cell_style_at(addr.row, addr.col, &core_style)
+                .map_err(to_py_err)?;
+        }
+        Ok(())
+    }
+
+    /// Set or clear sheet protection settings.
+    #[pyo3(signature = (protection))]
+    fn set_protection(&self, protection: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.workbook.write().map_err(to_py_err)?;
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| PyIndexError::new_err("Worksheet no longer exists"))?;
+        ws.set_protection(types::sheet_protection_input_to_core(protection)?);
+        Ok(())
+    }
+
+    /// Replace the protected editable ranges for this sheet.
+    #[pyo3(signature = (ranges))]
+    fn set_protected_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.workbook.write().map_err(to_py_err)?;
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| PyIndexError::new_err("Worksheet no longer exists"))?;
+        ws.set_protected_ranges(types::protected_ranges_input_to_core(ranges)?);
+        Ok(())
+    }
+
     /// Get the raw cell value (not calculated)
     #[pyo3(signature = (address))]
     fn get_cell(&self, address: &str) -> PyResult<PyCellValue> {
@@ -597,7 +681,11 @@ impl PyWorkbook {
         })
     }
 
-    /// Save the workbook to a file
+    /// Save the workbook to a file.
+    ///
+    /// Form-control state is synchronized into linked cells in the output,
+    /// replacing existing values and formulas there; this workbook is left
+    /// unchanged.
     ///
     /// The format is determined by the file extension:
     /// - .xlsx for Excel format
@@ -616,7 +704,9 @@ impl PyWorkbook {
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
-    /// Save the workbook to a password-protected file.
+    /// Save the workbook to a password-protected file. Form-control state is
+    /// synchronized into linked cells in the serialized file, replacing
+    /// existing values and formulas there.
     ///
     /// The encryption variant is chosen by `profile`:
     /// - "default" (or None): Agile AES-256 for .xlsx, RC4 CryptoAPI 128
@@ -751,6 +841,14 @@ impl PyWorkbook {
         wb.add_worksheet_with_name(name).map_err(to_py_err)
     }
 
+    /// Set or clear workbook structure/window protection settings.
+    #[pyo3(signature = (protection))]
+    fn set_workbook_protection(&self, protection: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut wb = self.inner.write().map_err(to_py_err)?;
+        wb.set_workbook_protection(types::workbook_protection_input_to_core(protection)?);
+        Ok(())
+    }
+
     /// Remove a worksheet by index
     ///
     /// Args:
@@ -773,10 +871,11 @@ impl PyWorkbook {
     ///     max_threads: Maximum threads for parallel evaluation. None means all cores (default: None)
     ///     web_service_fn: Optional callable(url: str) -> Optional[str] for WEBSERVICE evaluation
     ///     rtd_fn: Optional callable(prog_id: str, server: str, topics: list[str]) -> Optional[str] for RTD evaluation
+    ///     external_fn: Optional callable(book: str, name: str, args: list[str]) -> Optional[str|float|bool]
     ///
     /// Returns:
     ///     CalculationStats with information about the calculation
-    #[pyo3(signature = (*, iterative=false, max_iterations=100, max_change=0.001, force_full_calculation=true, calculate_volatile=true, sheets=vec![], max_threads=None, web_service_fn=None, rtd_fn=None))]
+    #[pyo3(signature = (*, iterative=false, max_iterations=100, max_change=0.001, force_full_calculation=true, calculate_volatile=true, sheets=vec![], max_threads=None, web_service_fn=None, rtd_fn=None, external_fn=None))]
     fn calculate(
         &self,
         iterative: bool,
@@ -788,6 +887,7 @@ impl PyWorkbook {
         max_threads: Option<usize>,
         web_service_fn: Option<PyObject>,
         rtd_fn: Option<PyObject>,
+        external_fn: Option<PyObject>,
     ) -> PyResult<PyCalculationStats> {
         let mut wb = self.inner.write().map_err(to_py_err)?;
         let web_service_fn_arc = web_service_fn.map(|py_fn| {
@@ -815,6 +915,30 @@ impl PyWorkbook {
                 },
             ) as Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>
         });
+        let external_fn_arc = external_fn.map(|py_fn| {
+            Arc::new(
+                move |book: &str, name: &str, args: &[String]| -> Option<FormulaValue> {
+                    Python::with_gil(|py| {
+                        let args_vec: Vec<String> = args.to_vec();
+                        let result = py_fn.call1(py, (book, name, args_vec)).ok()?;
+                        if result.is_none(py) {
+                            return None;
+                        }
+                        if let Ok(b) = result.extract::<bool>(py) {
+                            return Some(FormulaValue::Boolean(b));
+                        }
+                        if let Ok(n) = result.extract::<f64>(py) {
+                            return Some(FormulaValue::Number(n));
+                        }
+                        if let Ok(s) = result.extract::<String>(py) {
+                            return Some(FormulaValue::String(s));
+                        }
+                        None
+                    })
+                },
+            )
+                as Arc<dyn Fn(&str, &str, &[String]) -> Option<FormulaValue> + Send + Sync>
+        });
         let options = CalculationOptions {
             iterative,
             max_iterations,
@@ -825,6 +949,7 @@ impl PyWorkbook {
             max_threads,
             web_service_fn: web_service_fn_arc,
             rtd_fn: rtd_fn_arc,
+            external_fn: external_fn_arc,
         };
         let stats = wb.calculate_with_options(&options).map_err(to_py_err)?;
         Ok(stats.into())
@@ -905,6 +1030,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCalculationImage>()?;
     m.add_class::<PyCalculationStats>()?;
     m.add_class::<PyColor>()?;
+    m.add_class::<crate::drawings::PyRectEmu>()?;
     m.add_class::<PyFontStyle>()?;
     m.add_class::<PyGradientStop>()?;
     m.add_class::<PyFillStyle>()?;
@@ -921,6 +1047,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySplitPanes>()?;
     m.add_class::<PySelection>()?;
     m.add_class::<PySheetProtection>()?;
+    m.add_class::<PyWorkbookProtection>()?;
+    m.add_class::<PyProtectedRange>()?;
     m.add_class::<PyPageSetup>()?;
     m.add_class::<PyPageBreak>()?;
     m.add_class::<PyWorkbookSettings>()?;
@@ -944,6 +1072,20 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMergeSpan>()?;
     m.add_class::<PyChart>()?;
     m.add_class::<PyDrawingAnchor>()?;
+    m.add_class::<PyChildTransform>()?;
+    m.add_class::<PyGroupTransform>()?;
+    m.add_class::<PyDrawingMeta>()?;
+    m.add_class::<PyDrawingText>()?;
+    m.add_class::<PyShapeFill>()?;
+    m.add_class::<PyShapeLine>()?;
+    m.add_class::<PyShape>()?;
+    m.add_class::<PyDrawingComment>()?;
+    m.add_class::<PyDrawingGroup>()?;
+    m.add_class::<PyRawDrawingRelationship>()?;
+    m.add_class::<PyRawDrawing>()?;
+    m.add_class::<PyDrawing>()?;
+    m.add_class::<PyFormControlInteractionResult>()?;
+    m.add_class::<PyFormControl>()?;
     m.add_class::<PyDataSeries>()?;
     m.add_class::<PyDataReference>()?;
     m.add_class::<PyAxis>()?;
@@ -970,6 +1112,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyChartExData>()?;
     m.add_class::<PyChartExDimension>()?;
     m.add_class::<PyChartExAxis>()?;
+    m.add_class::<PyChartExGridlines>()?;
+    m.add_class::<PyChartStyle>()?;
+    m.add_class::<PyChartStyleEntry>()?;
+    m.add_class::<PyChartStyleReference>()?;
+    m.add_class::<PyChartColorStyle>()?;
     m.add_class::<PyChartExLegend>()?;
     m.add_class::<PyChartExDataLabels>()?;
     m.add_class::<PyChartExTitle>()?;

@@ -1,6 +1,6 @@
 [package]
 name = "duke-sheets-wasm"
-version = "0.1.15"
+version = "0.1.23-modus.1"
 edition = "2021"
 description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
 license = "MIT"
@@ -38,4 +38,4 @@ opt-level = "s"
 lto = true
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-Os"]
+wasm-opt = ["-Os", "--enable-reference-types"]

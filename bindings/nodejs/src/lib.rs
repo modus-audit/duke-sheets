@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use duke_sheets::{
-    CalculationOptions, CalculationStats as CoreCalculationStats, ImageSizing,
+    CalculationOptions, CalculationStats as CoreCalculationStats, FormulaValue, ImageSizing,
     WorkbookCalculationExt, WorkbookExt,
 };
 use duke_sheets_core::{
@@ -39,11 +39,9 @@ fn parse_encryption_profile(
         Some("standard") | Some("ooxml-standard") => EncryptionProfile::OoxmlStandard {
             key_bits: key_bits.unwrap_or(128),
         },
-        Some("rc4-cryptoapi") | Some("xls-rc4-cryptoapi") => {
-            EncryptionProfile::XlsRc4CryptoApi {
-                key_bits: key_bits.unwrap_or(128),
-            }
-        }
+        Some("rc4-cryptoapi") | Some("xls-rc4-cryptoapi") => EncryptionProfile::XlsRc4CryptoApi {
+            key_bits: key_bits.unwrap_or(128),
+        },
         Some("rc4-legacy") | Some("xls-rc4-legacy") => EncryptionProfile::XlsRc4Legacy,
         Some("xor") | Some("xls-xor") => EncryptionProfile::XlsXor,
         Some(other) => return Err(format!("unknown encryption profile: {other:?}")),
@@ -74,6 +72,7 @@ pub(crate) fn catch_panic<T>(f: impl FnOnce() -> napi::Result<T>) -> napi::Resul
 
 mod types;
 pub use types::*;
+pub(crate) mod drawings;
 mod workbook_read;
 mod worksheet_read;
 
@@ -97,7 +96,7 @@ fn cell_error_to_string(e: &CellError) -> &'static str {
 fn try_get_property<'a, T: FromNapiValue + ValidateNapiValue>(
     obj: &Object<'a>,
     key: &str,
-    ) -> napi::Result<Option<T>> {
+) -> napi::Result<Option<T>> {
     if !obj.has_named_property(key)? {
         return Ok(None);
     }
@@ -109,7 +108,6 @@ fn try_get_property<'a, T: FromNapiValue + ValidateNapiValue>(
     let v = obj.value();
     unsafe { T::from_napi_value(v.env, val.raw()).map(Some) }
 }
-
 
 /// Represents a cell value in a spreadsheet.
 ///
@@ -243,7 +241,7 @@ pub struct JsCalculationOptions {
     /// - 1: force serial evaluation
     /// - n: use at most n threads
     pub max_threads: Option<u32>,
-    }
+}
 
 impl JsCalculationOptions {
     fn into_core(self) -> CalculationOptions {
@@ -262,6 +260,7 @@ impl JsCalculationOptions {
             max_threads: self.max_threads.map(|n| n as usize),
             web_service_fn: None,
             rtd_fn: None,
+            external_fn: None,
         }
     }
 }
@@ -317,7 +316,6 @@ impl CalculationStats {
     pub fn iterations(&self) -> u32 {
         self.inner.iterations as u32
     }
-
 }
 
 /// The used range of a worksheet, describing the bounding box of all cells
@@ -403,6 +401,107 @@ impl Worksheet {
                 .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
 
             ws.set_cell_formula(&address, &formula).map_err(to_napi_err)
+        })
+    }
+
+    /// Set or update a cell style by address.
+    ///
+    /// A full style object returned by `getCellStyle()` can be used to copy a
+    /// style. Partial objects update only the provided top-level components.
+    #[napi]
+    pub fn set_cell_style(&self, address: String, style: JsStylePatch) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.workbook.write().map_err(to_napi_err)?;
+            let ws = wb
+                .worksheet_mut(self.sheet_index)
+                .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
+
+            let addr = CellAddress::parse(&address)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid cell address: {}", e)))?;
+
+            let mut core_style = ws
+                .cell_style_at(addr.row, addr.col)
+                .cloned()
+                .unwrap_or_default();
+            style.apply_to_core_style(&mut core_style)?;
+            ws.set_cell_style_at(addr.row, addr.col, &core_style)
+                .map_err(to_napi_err)
+        })
+    }
+
+    /// Set or update a cell style by row/col (0-based).
+    #[napi]
+    pub fn set_cell_style_at(&self, row: u32, col: u32, style: JsStylePatch) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.workbook.write().map_err(to_napi_err)?;
+            let ws = wb
+                .worksheet_mut(self.sheet_index)
+                .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
+
+            let mut core_style = ws
+                .cell_style_at(row, col as u16)
+                .cloned()
+                .unwrap_or_default();
+            style.apply_to_core_style(&mut core_style)?;
+            ws.set_cell_style_at(row, col as u16, &core_style)
+                .map_err(to_napi_err)
+        })
+    }
+
+    /// Set or update the style for all cells in a range (e.g. "A1:C3").
+    #[napi]
+    pub fn set_range_style(&self, range_str: String, style: JsStylePatch) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.workbook.write().map_err(to_napi_err)?;
+            let ws = wb
+                .worksheet_mut(self.sheet_index)
+                .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
+
+            let range = CellRange::parse(&range_str)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid range: {}", e)))?;
+            for addr in range.cells() {
+                let mut core_style = ws
+                    .cell_style_at(addr.row, addr.col)
+                    .cloned()
+                    .unwrap_or_default();
+                style.apply_to_core_style(&mut core_style)?;
+                ws.set_cell_style_at(addr.row, addr.col, &core_style)
+                    .map_err(to_napi_err)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Set or clear sheet protection settings.
+    #[napi(js_name = "setProtection")]
+    pub fn set_protection(&self, protection: Option<JsSheetProtectionInput>) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.workbook.write().map_err(to_napi_err)?;
+            let ws = wb
+                .worksheet_mut(self.sheet_index)
+                .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
+            let protection = protection
+                .map(JsSheetProtectionInput::into_core)
+                .transpose()?;
+            ws.set_protection(protection);
+            Ok(())
+        })
+    }
+
+    /// Replace the protected editable ranges for this sheet.
+    #[napi(js_name = "setProtectedRanges")]
+    pub fn set_protected_ranges(&self, ranges: Vec<JsProtectedRangeInput>) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.workbook.write().map_err(to_napi_err)?;
+            let ws = wb
+                .worksheet_mut(self.sheet_index)
+                .ok_or_else(|| napi::Error::from_reason("Worksheet no longer exists"))?;
+            let ranges = ranges
+                .into_iter()
+                .map(JsProtectedRangeInput::into_core)
+                .collect::<Result<Vec<_>>>()?;
+            ws.set_protected_ranges(ranges);
+            Ok(())
         })
     }
 
@@ -605,6 +704,7 @@ impl Worksheet {
             Ok(ws.unmerge_cells(&range))
         })
     }
+
 }
 
 /// A workbook containing one or more worksheets.
@@ -697,7 +797,11 @@ impl Workbook {
         })
     }
 
-    /// Save the workbook to a file
+    /// Save the workbook to a file.
+    ///
+    /// Form-control state is synchronized into linked cells in the output,
+    /// replacing existing values and formulas there; this workbook is left
+    /// unchanged.
     ///
     /// The format is determined by the file extension:
     /// - `.xlsx` for Excel format
@@ -715,7 +819,9 @@ impl Workbook {
         })
     }
 
-    /// Save the workbook to a password-protected file. The encryption
+    /// Save the workbook to a password-protected file. Form-control state is
+    /// synchronized into linked cells in the serialized file, replacing
+    /// existing values and formulas there. The encryption
     /// variant is selected via `profile`:
     ///
     /// - `"default"` (or null) - Agile-256 for .xlsx, RC4 CryptoAPI 128 for .xls
@@ -778,11 +884,14 @@ impl Workbook {
         })
     }
 
-    /// Save the workbook as a CSV string (first sheet only)
+    /// Save the workbook as a CSV string (first sheet only, with
+    /// form-control state synchronized into linked cells in the output)
     #[napi]
     pub fn save_csv_string(&self) -> Result<String> {
         catch_panic(|| {
             let wb = self.inner.read().map_err(to_napi_err)?;
+            let snapshot = wb.synchronized_for_save();
+            let wb = snapshot.as_ref().unwrap_or_else(|| &*wb);
             let ws = wb
                 .worksheet(0)
                 .ok_or_else(|| napi::Error::from_reason("No worksheets to save"))?;
@@ -870,6 +979,22 @@ impl Workbook {
         })
     }
 
+    /// Set or clear workbook structure/window protection settings.
+    #[napi(js_name = "setWorkbookProtection")]
+    pub fn set_workbook_protection(
+        &self,
+        protection: Option<JsWorkbookProtectionInput>,
+    ) -> Result<()> {
+        catch_panic(|| {
+            let mut wb = self.inner.write().map_err(to_napi_err)?;
+            let protection = protection
+                .map(JsWorkbookProtectionInput::into_core)
+                .transpose()?;
+            wb.set_workbook_protection(protection);
+            Ok(())
+        })
+    }
+
     /// Remove a worksheet by index
     ///
     /// @param index - Zero-based index of the worksheet to remove
@@ -885,20 +1010,18 @@ impl Workbook {
 
     /// Calculate all formulas in the workbook.
     ///
-    /// Optionally accepts calculation options. Callbacks (`webServiceFn`, `rtdFn`)
+    /// Optionally accepts calculation options. Callbacks (`webServiceFn`, `rtdFn`, `externalFn`)
     /// are only supported on the async path via `calculateAsync`.
     ///
     /// @param options - Optional calculation options
     /// @returns Statistics about the calculation
     #[napi]
-    pub fn calculate(
-        &self,
-        options: Option<JsCalculationOptions>,
-    ) -> Result<CalculationStats> {
+    pub fn calculate(&self, options: Option<JsCalculationOptions>) -> Result<CalculationStats> {
         catch_panic(|| {
             let mut wb = self.inner.write().map_err(to_napi_err)?;
             let stats = if let Some(opts) = options {
-                wb.calculate_with_options(&opts.into_core()).map_err(to_napi_err)?
+                wb.calculate_with_options(&opts.into_core())
+                    .map_err(to_napi_err)?
             } else {
                 wb.calculate().map_err(to_napi_err)?
             };
@@ -1053,6 +1176,8 @@ pub fn from_bytes_async(data: Buffer) -> AsyncTask<OpenBytesTask> {
 #[napi]
 impl Workbook {
     /// Save the workbook to a file asynchronously (non-blocking).
+    /// Form-control state is synchronized into linked cells in the output
+    /// without changing this workbook.
     ///
     /// @param path - Path to save to
     /// @returns Promise<void>
@@ -1076,7 +1201,7 @@ impl Workbook {
     /// @param options - Optional calculation options with optional callbacks
     /// @returns Promise<CalculationStats>
     #[napi(
-        ts_args_type = "options?: JsCalculationOptions & { webServiceFn?: (url: string) => Promise<string | null | undefined>; rtdFn?: (progId: string, server: string, topics: string[]) => Promise<string | null | undefined> }",
+        ts_args_type = "options?: JsCalculationOptions & { webServiceFn?: (url: string) => Promise<string | null | undefined>; rtdFn?: (progId: string, server: string, topics: string[]) => Promise<string | null | undefined>; externalFn?: (book: string, name: string, args: string[]) => Promise<string | null | undefined>; externalFnFn?: (book: string, name: string, args: string[]) => Promise<string | null | undefined> }",
         ts_return_type = "Promise<CalculationStats>"
     )]
     pub fn calculate_async<'env>(
@@ -1090,16 +1215,22 @@ impl Workbook {
             let max_change: Option<f64> = try_get_property(&options, "maxChange")?;
             let force_full_calculation: Option<bool> =
                 try_get_property(&options, "forceFullCalculation")?;
-            let calculate_volatile: Option<bool> =
-                try_get_property(&options, "calculateVolatile")?;
+            let calculate_volatile: Option<bool> = try_get_property(&options, "calculateVolatile")?;
             let sheets: Option<Vec<u32>> = try_get_property(&options, "sheets")?;
             let max_threads: Option<u32> = try_get_property(&options, "maxThreads")?;
 
             // Extract callback functions and build ThreadsafeFunctions
             let web_service_js_fn: Option<Function<'env, String, Promise<Option<String>>>> =
                 try_get_property(&options, "webServiceFn")?;
-            let rtd_js_fn: Option<Function<'env, (String, String, Vec<String>), Promise<Option<String>>>> =
-                try_get_property(&options, "rtdFn")?;
+            let rtd_js_fn: Option<
+                Function<'env, (String, String, Vec<String>), Promise<Option<String>>>,
+            > = try_get_property(&options, "rtdFn")?;
+            let external_js_fn: Option<
+                Function<'env, (String, String, Vec<String>), Promise<Option<String>>>,
+            > = match try_get_property(&options, "externalFn")? {
+                Some(f) => Some(f),
+                None => try_get_property(&options, "externalFnFn")?,
+            };
 
             let web_service_fn: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>> =
                 if let Some(js_fn) = web_service_js_fn {
@@ -1117,20 +1248,43 @@ impl Workbook {
                     None
                 };
 
+            let external_fn: Option<
+                Arc<dyn Fn(&str, &str, &[String]) -> Option<FormulaValue> + Send + Sync>,
+            > = if let Some(js_fn) = external_js_fn {
+                let tsfn = js_fn
+                    .build_threadsafe_function::<(String, String, Vec<String>)>()
+                    .build_callback(|ctx| Ok(FnArgs { data: ctx.value }))?;
+                let tsfn = Arc::new(tsfn);
+                Some(Arc::new(
+                    move |book: &str, name: &str, args: &[String]| -> Option<FormulaValue> {
+                        let args = (book.to_string(), name.to_string(), args.to_vec());
+                        let tsfn = Arc::clone(&tsfn);
+                        napi::bindgen_prelude::block_on(async move {
+                            let promise = tsfn.call_async(args).await.ok()?;
+                            promise.await.ok().flatten().map(FormulaValue::String)
+                        })
+                    },
+                ))
+            } else {
+                None
+            };
+
             let rtd_fn: Option<Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>> =
                 if let Some(js_fn) = rtd_js_fn {
                     let tsfn = js_fn
                         .build_threadsafe_function::<(String, String, Vec<String>)>()
                         .build_callback(|ctx| Ok(FnArgs { data: ctx.value }))?;
                     let tsfn = Arc::new(tsfn);
-                    Some(Arc::new(move |prog_id: &str, server: &str, topics: &[String]| -> Option<String> {
-                        let args = (prog_id.to_string(), server.to_string(), topics.to_vec());
-                        let tsfn = Arc::clone(&tsfn);
-                        napi::bindgen_prelude::block_on(async move {
-                            let promise = tsfn.call_async(args).await.ok()?;
-                            promise.await.ok().flatten()
-                        })
-                    }))
+                    Some(Arc::new(
+                        move |prog_id: &str, server: &str, topics: &[String]| -> Option<String> {
+                            let args = (prog_id.to_string(), server.to_string(), topics.to_vec());
+                            let tsfn = Arc::clone(&tsfn);
+                            napi::bindgen_prelude::block_on(async move {
+                                let promise = tsfn.call_async(args).await.ok()?;
+                                promise.await.ok().flatten()
+                            })
+                        },
+                    ))
                 } else {
                     None
                 };
@@ -1149,6 +1303,7 @@ impl Workbook {
                 max_threads: max_threads.map(|n| n as usize),
                 web_service_fn,
                 rtd_fn,
+                external_fn,
             })
         } else {
             None

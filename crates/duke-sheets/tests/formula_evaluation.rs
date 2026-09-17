@@ -137,11 +137,8 @@ fn test_excel_precision_preserves_non_cancelling_differences() {
     let visible_precision = evaluate(&parse_formula("=(43.1-43.2)+1").unwrap(), &ctx).unwrap();
     let meaningful_difference = evaluate(&parse_formula("=1.000000001-1").unwrap(), &ctx).unwrap();
     let tiny_sum = evaluate(&parse_formula("=1E-20+1E-20").unwrap(), &ctx).unwrap();
-    let corrected_cancellation = evaluate(
-        &parse_formula("=1.333+1.225-1.333-1.225").unwrap(),
-        &ctx,
-    )
-    .unwrap();
+    let corrected_cancellation =
+        evaluate(&parse_formula("=1.333+1.225-1.333-1.225").unwrap(), &ctx).unwrap();
     let exact_integer_difference = evaluate(
         &parse_formula("=4503599627370497-4503599627370496").unwrap(),
         &ctx,
@@ -325,7 +322,10 @@ fn test_workbook_calculate_power_zero_zero() {
     ctx.eval_cache = Some(&cache);
     let ast = parse_formula(wb.worksheet(0).unwrap().get_formula_at(0, 0).unwrap()).unwrap();
     // Excel returns #NUM! for POWER(0,0)
-    assert_eq!(evaluate(&ast, &ctx).unwrap(), FormulaValue::Error(CellError::Num));
+    assert_eq!(
+        evaluate(&ast, &ctx).unwrap(),
+        FormulaValue::Error(CellError::Num)
+    );
 
     wb.calculate().unwrap();
 
@@ -400,9 +400,9 @@ fn test_loaded_parity_cells_recalculate() {
     wb.calculate().unwrap();
 
     let tests_sheet = wb.worksheet(tests_sheet_idx).unwrap();
+    assert_eq!(tests_sheet.get_value_at(441, 2), CellValue::Number(1.0));
     assert_eq!(
-        tests_sheet.get_value_at(441, 2),
-        CellValue::Number(1.0)
+        tests_sheet.get_value_at(456, 2),
+        CellValue::Error(CellError::Num)
     );
-    assert_eq!(tests_sheet.get_value_at(456, 2), CellValue::Error(CellError::Num));
 }
