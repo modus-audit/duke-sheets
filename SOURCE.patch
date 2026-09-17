@@ -1,98 +1,77 @@
-diff --git a/bindings/wasm/src/lib.rs b/bindings/wasm/src/lib.rs
-index cf11f7a..5b12ba8 100644
---- a/bindings/wasm/src/lib.rs
-+++ b/bindings/wasm/src/lib.rs
-@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
- use wasm_bindgen::prelude::*;
- use wasm_bindgen::JsCast;
-
--use duke_sheets::{CalculationOptions, WorkbookCalculationExt};
-+use duke_sheets::{CalculationOptions, FormulaValue, WorkbookCalculationExt};
- use duke_sheets_core::{
-     CellAddress, CellError, CellRange, CellValue as CoreCellValue, Workbook as CoreWorkbook,
- };
-@@ -134,6 +134,10 @@ impl SendSyncFunction {
-         self.0.call1(this, arg)
-     }
-
-+    fn call2(&self, this: &JsValue, arg1: &JsValue, arg2: &JsValue) -> Result<JsValue, JsValue> {
-+        self.0.call2(this, arg1, arg2)
-+    }
+diff --git a/MODUS_PATCHES.md b/MODUS_PATCHES.md
+new file mode 100644
+index 0000000..30e21dd
+--- /dev/null
++++ b/MODUS_PATCHES.md
+@@ -0,0 +1,11 @@
++# Modus viewer engine
 +
-     fn call3(
-         &self,
-         this: &JsValue,
-@@ -670,6 +674,9 @@ impl Workbook {
-             let rtd_js_fn = js_sys::Reflect::get(&options, &JsValue::from_str("rtdFn"))
-                 .ok()
-                 .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
-+            let external_js_fn = js_sys::Reflect::get(&options, &JsValue::from_str("externalFnFn"))
-+                .ok()
-+                .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
-
-             let js_opts: JsCalculationOptions =
-                 serde_wasm_bindgen::from_value(options).map_err(to_js_error)?;
-@@ -708,6 +715,21 @@ impl Workbook {
-                     as Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>
-             });
-
-+            // Build external_fn from callback: externalFnFn(name, args[]) -> number|string|bool|null
-+            let external_fn = external_js_fn.map(|js_fn| {
-+                let wrapper = SendSyncFunction(js_fn);
-+                Arc::new(move |name: &str, args: &[String]| -> Option<FormulaValue> {
-+                    let args_arr = js_sys::Array::new();
-+                    for a in args {
-+                        args_arr.push(&JsValue::from_str(a));
-+                    }
-+                    let result = wrapper
-+                        .call2(&JsValue::NULL, &JsValue::from_str(name), &args_arr.into())
-+                        .ok()?;
-+                    js_value_to_formula_value(result)
-+                }) as Arc<dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync>
-+            });
++Based on upstream `wasm-v0.1.23` (`b30fff867622703f71edea6be16f20a2d4f96193`).
 +
-             CalculationOptions {
-                 iterative: js_opts.iterative.unwrap_or(false),
-                 max_iterations: js_opts.max_iterations.unwrap_or(100),
-@@ -718,6 +740,7 @@ impl Workbook {
-                 max_threads: js_opts.max_threads,
-                 web_service_fn,
-                 rtd_fn,
-+                external_fn,
-             }
-         } else {
-             CalculationOptions::default()
-@@ -745,6 +768,22 @@ impl Default for Workbook {
-     }
- }
-
-+/// Convert a JS value returned by an `externalFnFn` callback into a typed FormulaValue.
-+/// `null`/`undefined` -> `None` (yields `#N/A`). Booleans take priority over numbers.
-+fn js_value_to_formula_value(value: JsValue) -> Option<FormulaValue> {
-+    if value.is_null() || value.is_undefined() {
-+        None
-+    } else if let Some(b) = value.as_bool() {
-+        Some(FormulaValue::Boolean(b))
-+    } else if let Some(n) = value.as_f64() {
-+        Some(FormulaValue::Number(n))
-+    } else if let Some(s) = value.as_string() {
-+        Some(FormulaValue::String(s))
-+    } else {
-+        None
-+    }
-+}
++The Modus patches preserve built-in accounting formats 41–44 in both format registries and cancel floating-point reconciliation residue without rounding real differences or exact integer subtraction. External add-in callbacks and cached unresolved values now come from upstream.
 +
- fn js_to_cell_value(value: JsValue) -> Result<CoreCellValue, JsError> {
-     if value.is_null() || value.is_undefined() {
-         Ok(CoreCellValue::Empty)
++Validate with `cargo test -p ssfmt -p duke-sheets-core` and `cargo test -p duke-sheets --test formula_evaluation`.
++
++Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.1`. The generated manifest records the exact source commit. Never move an existing distribution tag.
++
++The application-level regression suite in `peasebell/e2e/tests/xlsx` exercises the packaged WASM through both the main-thread and worker viewer paths.
+diff --git a/bindings/wasm/Cargo.lock b/bindings/wasm/Cargo.lock
+index fbc4e1c..d666d8a 100644
+--- a/bindings/wasm/Cargo.lock
++++ b/bindings/wasm/Cargo.lock
+@@ -503,7 +503,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "duke-sheets-wasm"
+-version = "0.1.23"
++version = "0.1.23-modus.1"
+ dependencies = [
+  "chrono",
+  "duke-sheets",
+diff --git a/bindings/wasm/Cargo.toml b/bindings/wasm/Cargo.toml
+index 41a982f..322aa1d 100644
+--- a/bindings/wasm/Cargo.toml
++++ b/bindings/wasm/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "duke-sheets-wasm"
+-version = "0.1.23"
++version = "0.1.23-modus.1"
+ edition = "2021"
+ description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
+ license = "MIT"
+diff --git a/bindings/wasm/package-modus.mjs b/bindings/wasm/package-modus.mjs
+new file mode 100644
+index 0000000..a642b29
+--- /dev/null
++++ b/bindings/wasm/package-modus.mjs
+@@ -0,0 +1,18 @@
++import { execFileSync } from "node:child_process";
++import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
++
++const packageDirectory = new URL("./pkg/", import.meta.url);
++const packagePath = new URL("package.json", packageDirectory);
++const metadata = JSON.parse(readFileSync(packagePath, "utf8"));
++metadata.name = "@dukelib/sheets-wasm";
++metadata.repository = {
++  type: "git",
++  url: "https://github.com/modus-audit/duke-sheets.git",
++  directory: "bindings/wasm",
++};
++metadata.modusSource = execFileSync("git", ["rev-parse", "HEAD"], {
++  cwd: new URL("../../", import.meta.url),
++  encoding: "utf8",
++}).trim();
++writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
++copyFileSync(new URL("../../LICENSE", import.meta.url), new URL("LICENSE", packageDirectory));
 diff --git a/crates/duke-sheets-core/src/cell/view.rs b/crates/duke-sheets-core/src/cell/view.rs
-index f6f8d09..3d15890 100644
+index f6f8d09..4627c96 100644
 --- a/crates/duke-sheets-core/src/cell/view.rs
 +++ b/crates/duke-sheets-core/src/cell/view.rs
 @@ -653,6 +653,16 @@ mod tests {
          );
      }
-
+ 
 +    #[test]
 +    fn builtin_accounting_decimal() {
 +        let result = fmt(
@@ -104,8 +83,19 @@ index f6f8d09..3d15890 100644
 +    }
 +
      // Edge cases
-
+ 
      #[test]
+@@ -696,6 +706,9 @@ mod tests {
+         let val = CellValue::Number(46022.0);
+         let fmt_code = NumberFormat::Custom("m/d/yyyy_)".to_string());
+         let result = fmt(&val, &fmt_code, false);
+-        assert_eq!(result, "12/31/2025 ", "underscore-paren should produce a space, not a literal ')'");
++        assert_eq!(
++            result, "12/31/2025 ",
++            "underscore-paren should produce a space, not a literal ')'"
++        );
+     }
+ }
 diff --git a/crates/duke-sheets-core/src/style/number_format.rs b/crates/duke-sheets-core/src/style/number_format.rs
 index df7e64a..135ab58 100644
 --- a/crates/duke-sheets-core/src/style/number_format.rs
@@ -120,7 +110,7 @@ index df7e64a..135ab58 100644
 +    pub const ID_ACCOUNTING_DOLLAR_DEC2: u32 = 44;
      /// 49 - @
      pub const ID_TEXT: u32 = 49;
-
+ 
 @@ -175,6 +179,10 @@ impl NumberFormat {
              38 => "#,##0_);[Red](#,##0)",
              39 => "#,##0.00_);(#,##0.00)",
@@ -132,387 +122,199 @@ index df7e64a..135ab58 100644
              45 => "mm:ss",
              46 => "[h]:mm:ss",
              47 => "mm:ss.0",
-diff --git a/crates/duke-sheets-formula/src/ast.rs b/crates/duke-sheets-formula/src/ast.rs
-index 1914444..89e2a73 100644
---- a/crates/duke-sheets-formula/src/ast.rs
-+++ b/crates/duke-sheets-formula/src/ast.rs
-@@ -42,6 +42,18 @@ pub enum FormulaExpr {
-         args: Vec<FormulaExpr>,
-     },
-
-+    /// External add-in function call, e.g. `[1]!TBLink("Consolidated","CONSUL[3]",...)`.
-+    /// `book` is the external-workbook index/name between the brackets (`"1"`); `name` keeps
-+    /// the add-in function name verbatim (case preserved — e.g. `TBLink`, `cyedate`).
-+    /// Evaluated via a host callback (`EvaluationContext::external_fn`) rather than the
-+    /// built-in registry, so the host (browser) can resolve it against a server while the
-+    /// formula text stays untouched (and still resolves via the add-in in Excel).
-+    ExternalFunction {
-+        book: String,
-+        name: String,
-+        args: Vec<FormulaExpr>,
-+    },
-+
-     Array(Vec<Vec<FormulaExpr>>),
-
-     /// Empty/omitted argument (e.g., the missing 4th arg in `XLOOKUP(x,a,b,,1)`)
 diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
-index 3caea14..ee98808 100644
+index 515b5a7..99e3417 100644
 --- a/crates/duke-sheets-formula/src/evaluator.rs
 +++ b/crates/duke-sheets-formula/src/evaluator.rs
-@@ -188,6 +188,11 @@ pub struct EvaluationContext<'a> {
-     pub web_service_fn: Option<&'a (dyn Fn(&str) -> Option<String> + Send + Sync)>,
-     /// Optional RTD callback.
-     pub rtd_fn: Option<&'a (dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync)>,
-+    /// Optional external add-in function callback for `[N]!Name(args)` calls (e.g. CCH `TBLink`).
-+    /// Receives the verbatim function name and stringified args; returns a typed value, or
-+    /// `None` to yield `#N/A`. Lets a host (browser) resolve add-in functions against a server
-+    /// while the formula text stays untouched (and still resolves via the add-in in Excel).
-+    pub external_fn: Option<&'a (dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync)>,
-     /// Optional IMAGE metadata sink.
-     pub image_sink: Option<&'a (dyn Fn(usize, u32, u16, ImageInfo) + Send + Sync)>,
-     /// Shared evaluation cache (range materialization, lookup indexes, sheet names).
-@@ -204,6 +209,7 @@ impl<'a> EvaluationContext<'a> {
-             current_col: col,
-             web_service_fn: None,
-             rtd_fn: None,
-+            external_fn: None,
-             image_sink: None,
-             eval_cache: None,
-         }
-@@ -218,6 +224,7 @@ impl<'a> EvaluationContext<'a> {
-             current_col: 0,
-             web_service_fn: None,
-             rtd_fn: None,
-+            external_fn: None,
-             image_sink: None,
-             eval_cache: None,
-         }
-@@ -796,6 +803,10 @@ pub fn evaluate(expr: &FormulaExpr, ctx: &EvaluationContext) -> FormulaResult<Fo
-
-         FormulaExpr::Function { name, args } => evaluate_function(name, args, ctx),
-
-+        FormulaExpr::ExternalFunction { name, args, .. } => {
-+            evaluate_external_function(name, args, ctx)
-+        }
-+
-         FormulaExpr::Array(rows) => {
-             let mut result_rows = Vec::new();
-             for row in rows {
-@@ -2122,6 +2133,56 @@ fn evaluate_vlookup_fast(
+@@ -878,6 +878,20 @@ fn to_array(val: &FormulaValue) -> Vec<Vec<FormulaValue>> {
+     }
  }
-
- /// Evaluate a function call
-+/// Evaluate an external add-in function call (`[N]!Name(args)`) by delegating to the host's
-+/// `external_fn` callback. Args are evaluated then stringified (CCH add-in args are string/number
-+/// literals). Returns the callback's typed value, or `#N/A` when no callback is set / unresolved
-+/// (matching WEBSERVICE's no-handler behavior).
-+fn evaluate_external_function(
-+    name: &str,
-+    args: &[FormulaExpr],
-+    ctx: &EvaluationContext,
-+) -> FormulaResult<FormulaValue> {
-+    let mut arg_strings = Vec::with_capacity(args.len());
-+    for arg in args {
-+        let value = evaluate(arg, ctx)?;
-+        if let FormulaValue::Error(e) = value {
-+            return Ok(FormulaValue::Error(e));
-+        }
-+        arg_strings.push(external_arg_to_string(&value));
-+    }
-+
-+    match ctx.external_fn {
-+        Some(handler) => {
-+            Ok(handler(name, &arg_strings).unwrap_or(FormulaValue::Error(CellError::Na)))
-+        }
-+        None => Ok(FormulaValue::Error(CellError::Na)),
+ 
++fn correct_cancellation(result: f64, left: f64, right: f64) -> f64 {
++    let operand_scale = left.abs().max(right.abs());
++    if result != 0.0
++        && result.is_finite()
++        && operand_scale.is_finite()
++        && (left.fract() != 0.0 || right.fract() != 0.0)
++        && result.abs() <= operand_scale * f64::EPSILON
++    {
++        0.0
++    } else {
++        result
 +    }
 +}
 +
-+/// Render an evaluated argument as the string the host callback receives.
-+fn external_arg_to_string(value: &FormulaValue) -> String {
-+    match value {
-+        FormulaValue::String(s) => s.clone(),
-+        FormulaValue::Number(n) => {
-+            if n.fract() == 0.0 && n.is_finite() {
-+                format!("{}", *n as i64)
-+            } else {
-+                format!("{}", n)
-+            }
-+        }
-+        FormulaValue::Boolean(b) => {
-+            if *b {
-+                "TRUE".to_string()
-+            } else {
-+                "FALSE".to_string()
-+            }
-+        }
-+        FormulaValue::Empty => String::new(),
-+        // Errors are returned early above; arrays aren't expected as add-in args.
-+        FormulaValue::Error(_) | FormulaValue::Array { .. } => String::new(),
-+    }
-+}
-+
- fn evaluate_function(
-     name: &str,
-     args: &[FormulaExpr],
-diff --git a/crates/duke-sheets-formula/src/parser.rs b/crates/duke-sheets-formula/src/parser.rs
-index de2fd91..807aaab 100644
---- a/crates/duke-sheets-formula/src/parser.rs
-+++ b/crates/duke-sheets-formula/src/parser.rs
-@@ -1003,11 +1003,20 @@ impl<'a> FormulaParser<'a> {
+ fn apply_scalar_binary_op(
+     op: BinaryOperator,
+     left_val: &FormulaValue,
+@@ -900,7 +914,7 @@ fn apply_scalar_binary_op(
+             let r = right_val
+                 .as_number()
+                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
+-            Ok(FormulaValue::Number(l + r))
++            Ok(FormulaValue::Number(correct_cancellation(l + r, l, r)))
+         }
+         BinaryOperator::Subtract => {
+             let l = left_val
+@@ -909,7 +923,7 @@ fn apply_scalar_binary_op(
+             let r = right_val
+                 .as_number()
+                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
+-            Ok(FormulaValue::Number(l - r))
++            Ok(FormulaValue::Number(correct_cancellation(l - r, l, r)))
+         }
+         BinaryOperator::Multiply => {
+             let l = left_val
+@@ -2136,9 +2150,8 @@ fn evaluate_external_function(
      }
-
-     fn parse_function_call(&mut self, name: String) -> FormulaResult<FormulaExpr> {
-+        let args = self.parse_call_args()?;
-+        Ok(FormulaExpr::Function {
-+            name: name.to_uppercase(),
-+            args,
-+        })
-+    }
-+
-+    /// Parse a parenthesized, comma-separated argument list (supports empty/omitted args,
-+    /// e.g. `XLOOKUP(x,a,b,,1)`). Assumes the next token is `(`.
-+    fn parse_call_args(&mut self) -> FormulaResult<Vec<FormulaExpr>> {
-         self.expect(&Token::LeftParen)?;
-
-         let mut args = Vec::new();
-
--        // Parse arguments, supporting empty/omitted args (e.g., XLOOKUP(x,a,b,,1))
-         if !matches!(self.current_token(), Token::RightParen) {
-             // First argument: empty if immediately followed by comma
-             if matches!(self.current_token(), Token::Comma) {
-@@ -1028,11 +1037,7 @@ impl<'a> FormulaParser<'a> {
-         }
-
-         self.expect(&Token::RightParen)?;
--
--        Ok(FormulaExpr::Function {
--            name: name.to_uppercase(),
--            args,
--        })
-+        Ok(args)
-     }
-
-     fn parse_sheet_reference(&mut self, sheet: String) -> FormulaResult<FormulaExpr> {
-@@ -1106,6 +1111,32 @@ impl<'a> FormulaParser<'a> {
-                 // Named range in external workbook
-                 Ok(FormulaExpr::NameRef(format!("[{}]{}", content, name)))
-             }
-+            // Book-scoped reference: `[book]!Name` or `[book]!Name(args)`. The lone `!`
-+            // scans as Unknown('!'). This is how CCH add-in calls appear, e.g.
-+            // `=[1]!TBLink("Consolidated","CONSUL[3]","1000-499-814","0","3")`.
-+            Token::Unknown('!') => {
-+                self.consume(); // consume '!'
-+                match self.current_token().clone() {
-+                    Token::Identifier(name) => {
-+                        self.consume();
-+                        if matches!(self.current_token(), Token::LeftParen) {
-+                            // External add-in function call (name kept verbatim for the host callback).
-+                            let args = self.parse_call_args()?;
-+                            Ok(FormulaExpr::ExternalFunction {
-+                                book: content,
-+                                name,
-+                                args,
-+                            })
-+                        } else {
-+                            // Book-scoped defined name.
-+                            Ok(FormulaExpr::NameRef(format!("[{}]!{}", content, name)))
-+                        }
-+                    }
-+                    _ => Err(FormulaError::Parse(
-+                        "Expected name after external workbook '!'".into(),
-+                    )),
-+                }
-+            }
-             _ => {
-                 // Not followed by a reference - unqualified structured ref
-                 self.parse_structured_ref_content(None, &content)
-diff --git a/crates/duke-sheets-xls/src/writer.rs b/crates/duke-sheets-xls/src/writer.rs
-index f28b248..b1e8ec4 100644
---- a/crates/duke-sheets-xls/src/writer.rs
-+++ b/crates/duke-sheets-xls/src/writer.rs
-@@ -2036,6 +2036,11 @@ fn collect_addin_names_expr(
-                 collect_addin_names_expr(arg, out);
-             }
-         }
-+        FormulaExpr::ExternalFunction { args, .. } => {
-+            for arg in args {
-+                collect_addin_names_expr(arg, out);
-+            }
-+        }
-         FormulaExpr::BinaryOp { left, right, .. } => {
-             collect_addin_names_expr(left, out);
-             collect_addin_names_expr(right, out);
-@@ -2107,7 +2112,7 @@ fn collect_formula_expr_sheet_names(
-             collect_formula_expr_sheet_names(right, out);
-         }
-         FormulaExpr::UnaryOp { operand, .. } => collect_formula_expr_sheet_names(operand, out),
--        FormulaExpr::Function { args, .. } => {
-+        FormulaExpr::Function { args, .. } | FormulaExpr::ExternalFunction { args, .. } => {
-             for arg in args {
-                 collect_formula_expr_sheet_names(arg, out);
-             }
-@@ -3469,7 +3474,10 @@ fn compile_ptgs_with_context(
-         FormulaExpr::Array(rows) => {
-             emit_array_constant(rows, out, extra)?;
-         }
--        FormulaExpr::StructuredRef(_) | FormulaExpr::ExternalRef(_) | FormulaExpr::Empty => {
-+        FormulaExpr::StructuredRef(_)
-+        | FormulaExpr::ExternalRef(_)
-+        | FormulaExpr::ExternalFunction { .. }
-+        | FormulaExpr::Empty => {
-             return Err(UnsupportedToken);
-         }
-     }
-diff --git a/crates/duke-sheets-xlsb/src/biff12/compiler.rs b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
-index 39223c8..4a77a35 100644
---- a/crates/duke-sheets-xlsb/src/biff12/compiler.rs
-+++ b/crates/duke-sheets-xlsb/src/biff12/compiler.rs
-@@ -172,6 +172,10 @@ fn emit_expr(
-             log::warn!("external workbook reference compilation not supported, emitting #REF!");
-             emit_error(&CellError::Ref, out)
-         }
-+        FormulaExpr::ExternalFunction { .. } => {
-+            log::warn!("external add-in function compilation not supported, emitting #NAME?");
-+            emit_error(&CellError::Name, out)
-+        }
-     }
- }
-
+ 
+     match ctx.external_fn {
+-        Some(handler) => handler(book, name, &arg_strings).ok_or_else(|| {
+-            FormulaError::ExternalFunctionUnresolved(format!("[{book}]!{name}"))
+-        }),
++        Some(handler) => handler(book, name, &arg_strings)
++            .ok_or_else(|| FormulaError::ExternalFunctionUnresolved(format!("[{book}]!{name}"))),
+         None => Err(FormulaError::ExternalFunctionUnresolved(format!(
+             "[{book}]!{name}"
+         ))),
 diff --git a/crates/duke-sheets/examples/profile_calc.rs b/crates/duke-sheets/examples/profile_calc.rs
-index 87667ad..0e4b3a5 100644
+index d2d0950..02b68e0 100644
 --- a/crates/duke-sheets/examples/profile_calc.rs
 +++ b/crates/duke-sheets/examples/profile_calc.rs
-@@ -182,7 +182,8 @@ impl<'a> ParallelAnalyzer<'a> {
+@@ -182,7 +182,7 @@ impl<'a> ParallelAnalyzer<'a> {
              FormulaExpr::UnaryOp { operand, .. } => {
                  self.extract_refs_from_expr(operand, current_sheet, refs);
              }
 -            FormulaExpr::Function { args, .. } => {
-+            FormulaExpr::Function { args, .. }
-+            | FormulaExpr::ExternalFunction { args, .. } => {
++            FormulaExpr::Function { args, .. } | FormulaExpr::ExternalFunction { args, .. } => {
                  for arg in args {
                      self.extract_refs_from_expr(arg, current_sheet, refs);
                  }
-diff --git a/crates/duke-sheets/src/calculation.rs b/crates/duke-sheets/src/calculation.rs
-index 9a6e884..6008b12 100644
---- a/crates/duke-sheets/src/calculation.rs
-+++ b/crates/duke-sheets/src/calculation.rs
-@@ -79,6 +79,11 @@ pub struct CalculationOptions {
-     ///
-     /// Returning `None` produces `#N/A`.
-     pub rtd_fn: Option<Arc<dyn Fn(&str, &str, &[String]) -> Option<String> + Send + Sync>>,
-+    /// Optional callback for external add-in function calls, `[N]!Name(args)` (e.g. CCH `TBLink`,
-+    /// `CLIENTNAME`, `cyedate`). Receives the verbatim function name and stringified args; returns
-+    /// a typed value, or `None` to produce `#N/A`. Lets a host resolve add-in functions while the
-+    /// formula text stays untouched.
-+    pub external_fn: Option<Arc<dyn Fn(&str, &[String]) -> Option<FormulaValue> + Send + Sync>>,
+diff --git a/crates/duke-sheets/tests/formula_evaluation.rs b/crates/duke-sheets/tests/formula_evaluation.rs
+index 518180e..d7ce969 100644
+--- a/crates/duke-sheets/tests/formula_evaluation.rs
++++ b/crates/duke-sheets/tests/formula_evaluation.rs
+@@ -79,6 +79,95 @@ fn test_evaluate_with_cell_references() {
+     assert_eq!(result, FormulaValue::Boolean(true));
  }
-
- impl fmt::Debug for CalculationOptions {
-@@ -96,6 +101,10 @@ impl fmt::Debug for CalculationOptions {
-                 &self.web_service_fn.as_ref().map(|_| "<callback>"),
-             )
-             .field("rtd_fn", &self.rtd_fn.as_ref().map(|_| "<callback>"))
-+            .field(
-+                "external_fn",
-+                &self.external_fn.as_ref().map(|_| "<callback>"),
-+            )
-             .finish()
-     }
- }
-@@ -112,6 +121,7 @@ impl Default for CalculationOptions {
-             max_threads: None,
-             web_service_fn: None,
-             rtd_fn: None,
-+            external_fn: None,
-         }
-     }
- }
-@@ -390,6 +400,11 @@ fn shift_formula_rows(expr: &mut FormulaExpr, row_delta: i32) {
-                 shift_formula_rows(arg, row_delta);
-             }
-         }
-+        FormulaExpr::ExternalFunction { args, .. } => {
-+            for arg in args {
-+                shift_formula_rows(arg, row_delta);
-+            }
+ 
++#[test]
++fn test_excel_precision_cancels_bank_reconciliation_differences() {
++    let mut wb = Workbook::new();
++    {
++        let sheet = wb.worksheet_mut(0).unwrap();
++        let cases = [
++            (2_231_846.68, -1_084_381.76, 1_147_464.92),
++            (1_627_144.62, -19_623.98, 1_607_520.64),
++            (974_088.06, -55_324.24, 918_763.82),
++            (1_259_114.13, -235_621.58, 1_023_492.55),
++            (776_834.28, -35_579.47, 741_254.81),
++        ];
++
++        for (index, (bank_balance, outstanding_checks, book_balance)) in
++            cases.into_iter().enumerate()
++        {
++            let row = index + 1;
++            sheet
++                .set_cell_value(&format!("A{row}"), bank_balance)
++                .unwrap();
++            sheet
++                .set_cell_value(&format!("B{row}"), outstanding_checks)
++                .unwrap();
++            sheet
++                .set_cell_value(&format!("C{row}"), book_balance)
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("D{row}"), &format!("=A{row}+B{row}"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("E{row}"), &format!("=D{row}-C{row}"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("F{row}"), &format!("=E{row}=0"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("G{row}"), &format!("=E{row}+100"))
++                .unwrap();
 +        }
-         FormulaExpr::Array(rows) => {
-             for row in rows {
-                 for cell in row {
-@@ -1239,6 +1254,7 @@ impl CalculationEngine {
-                 EvaluationContext::new(Some(wb_ref), cell_key.sheet, cell_key.row, cell_key.col);
-             ctx.web_service_fn = self.options.web_service_fn.as_deref();
-             ctx.rtd_fn = self.options.rtd_fn.as_deref();
-+            ctx.external_fn = self.options.external_fn.as_deref();
-             ctx.image_sink = Some(&image_sink);
-             ctx.eval_cache = Some(eval_cache);
-
-@@ -1339,6 +1355,7 @@ impl CalculationEngine {
-             EvaluationContext::new(Some(workbook), cell_key.sheet, cell_key.row, cell_key.col);
-         ctx.web_service_fn = self.options.web_service_fn.as_deref();
-         ctx.rtd_fn = self.options.rtd_fn.as_deref();
-+        ctx.external_fn = self.options.external_fn.as_deref();
-         ctx.image_sink = Some(&image_sink);
-         ctx.eval_cache = Some(eval_cache);
-         match evaluate(ast, &ctx) {
-@@ -1789,6 +1806,20 @@ fn extract_references_recursive(
-                 );
-             }
-         }
-+        FormulaExpr::ExternalFunction { args, .. } => {
-+            for arg in args {
-+                extract_references_recursive(
-+                    arg,
-+                    current_sheet,
-+                    workbook,
-+                    formula_cells,
-+                    formula_cell_index,
-+                    range_dep_cache,
-+                    value_sensitive_ranges,
-+                    refs,
-+                );
-+            }
-+        }
-         FormulaExpr::Array(rows) => {
-             for row in rows {
-                 for cell in row {
-@@ -1884,9 +1915,10 @@ fn collect_value_sensitive_ranges(
-         | FormulaExpr::Boolean(_)
-         | FormulaExpr::Error(_)
-         | FormulaExpr::Empty => true,
--        FormulaExpr::NameRef(_) | FormulaExpr::ExternalRef(_) | FormulaExpr::StructuredRef(_) => {
--            false
--        }
-+        FormulaExpr::NameRef(_)
-+        | FormulaExpr::ExternalRef(_)
-+        | FormulaExpr::ExternalFunction { .. }
-+        | FormulaExpr::StructuredRef(_) => false,
-     }
++    }
++
++    wb.calculate().unwrap();
++
++    let sheet = wb.worksheet(0).unwrap();
++    for row in 0..5 {
++        assert_eq!(sheet.get_value_at(row, 4), CellValue::Number(0.0));
++        assert_eq!(sheet.get_value_at(row, 5), CellValue::Boolean(true));
++        assert_eq!(sheet.get_value_at(row, 6), CellValue::Number(100.0));
++    }
++}
++
++#[test]
++fn test_excel_precision_preserves_non_cancelling_differences() {
++    let ctx = EvaluationContext::simple();
++
++    let visible_precision = evaluate(&parse_formula("=(43.1-43.2)+1").unwrap(), &ctx).unwrap();
++    let meaningful_difference = evaluate(&parse_formula("=1.000000001-1").unwrap(), &ctx).unwrap();
++    let tiny_sum = evaluate(&parse_formula("=1E-20+1E-20").unwrap(), &ctx).unwrap();
++    let corrected_cancellation =
++        evaluate(&parse_formula("=1.333+1.225-1.333-1.225").unwrap(), &ctx).unwrap();
++    let exact_integer_difference = evaluate(
++        &parse_formula("=4503599627370497-4503599627370496").unwrap(),
++        &ctx,
++    )
++    .unwrap();
++    let exact_integer_sum = evaluate(
++        &parse_formula("=4503599627370497+-4503599627370496").unwrap(),
++        &ctx,
++    )
++    .unwrap();
++
++    let FormulaValue::Number(visible_precision) = visible_precision else {
++        panic!("expected numeric result");
++    };
++    let FormulaValue::Number(meaningful_difference) = meaningful_difference else {
++        panic!("expected numeric result");
++    };
++    let FormulaValue::Number(tiny_sum) = tiny_sum else {
++        panic!("expected numeric result");
++    };
++
++    assert_eq!(visible_precision, 0.8999999999999986);
++    assert_ne!(meaningful_difference, 0.0);
++    assert_eq!(tiny_sum, 2e-20);
++    assert_eq!(corrected_cancellation, FormulaValue::Number(0.0));
++    assert_eq!(exact_integer_difference, FormulaValue::Number(1.0));
++    assert_eq!(exact_integer_sum, FormulaValue::Number(1.0));
++}
++
+ /// Test formula evaluation with range references
+ #[test]
+ fn test_evaluate_with_range_references() {
+@@ -233,7 +322,10 @@ fn test_workbook_calculate_power_zero_zero() {
+     ctx.eval_cache = Some(&cache);
+     let ast = parse_formula(wb.worksheet(0).unwrap().get_formula_at(0, 0).unwrap()).unwrap();
+     // Excel returns #NUM! for POWER(0,0)
+-    assert_eq!(evaluate(&ast, &ctx).unwrap(), FormulaValue::Error(CellError::Num));
++    assert_eq!(
++        evaluate(&ast, &ctx).unwrap(),
++        FormulaValue::Error(CellError::Num)
++    );
+ 
+     wb.calculate().unwrap();
+ 
+@@ -308,9 +400,9 @@ fn test_loaded_parity_cells_recalculate() {
+     wb.calculate().unwrap();
+ 
+     let tests_sheet = wb.worksheet(tests_sheet_idx).unwrap();
++    assert_eq!(tests_sheet.get_value_at(441, 2), CellValue::Number(1.0));
+     assert_eq!(
+-        tests_sheet.get_value_at(441, 2),
+-        CellValue::Number(1.0)
++        tests_sheet.get_value_at(456, 2),
++        CellValue::Error(CellError::Num)
+     );
+-    assert_eq!(tests_sheet.get_value_at(456, 2), CellValue::Error(CellError::Num));
  }
-
-@@ -2011,6 +2043,11 @@ fn collect_input_ranges(
-                 collect_input_ranges(arg, current_sheet, workbook, formula_cells, ranges);
-             }
-         }
-+        FormulaExpr::ExternalFunction { args, .. } => {
-+            for arg in args {
-+                collect_input_ranges(arg, current_sheet, workbook, formula_cells, ranges);
-+            }
-+        }
-         FormulaExpr::Array(rows) => {
-             for row in rows {
-                 for cell in row {
-@@ -2583,6 +2620,9 @@ fn contains_volatile_function(expr: &FormulaExpr) -> bool {
-             contains_volatile_function(left) || contains_volatile_function(right)
-         }
-         FormulaExpr::UnaryOp { operand, .. } => contains_volatile_function(operand),
-+        // External add-in values (TBLink, etc.) are server-backed and can change between
-+        // recalcs, so always treat them as volatile to keep them live.
-+        FormulaExpr::ExternalFunction { .. } => true,
-         FormulaExpr::Array(rows) => rows
-             .iter()
-             .any(|row| row.iter().any(contains_volatile_function)),
 diff --git a/crates/ssfmt/src/builtin_formats.rs b/crates/ssfmt/src/builtin_formats.rs
 index 263f22f..63f5b0c 100644
 --- a/crates/ssfmt/src/builtin_formats.rs
@@ -556,22 +358,55 @@ index 263f22f..63f5b0c 100644
 +            Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
 +        );
      }
-
+ 
      #[test]
 diff --git a/crates/ssfmt/tests/builtin_format_id_tests.rs b/crates/ssfmt/tests/builtin_format_id_tests.rs
-index e753a04..af26268 100644
+index e753a04..4cf02c4 100644
 --- a/crates/ssfmt/tests/builtin_format_id_tests.rs
 +++ b/crates/ssfmt/tests/builtin_format_id_tests.rs
-@@ -128,7 +128,7 @@ fn test_invalid_format_ids() {
+@@ -1,4 +1,4 @@
+-use ssfmt::{format_with_id_default, format_code_from_id};
++use ssfmt::{format_code_from_id, format_with_id_default};
+ 
+ /// Test built-in format ID 0 (General)
+ #[test]
+@@ -49,7 +49,10 @@ fn test_format_id_3_thousands() {
+ fn test_format_id_4_thousands_decimals() {
+     assert_eq!(format_with_id_default(0.0, 4).unwrap(), "0.00");
+     assert_eq!(format_with_id_default(1234.56, 4).unwrap(), "1,234.56");
+-    assert_eq!(format_with_id_default(1234567.89, 4).unwrap(), "1,234,567.89");
++    assert_eq!(
++        format_with_id_default(1234567.89, 4).unwrap(),
++        "1,234,567.89"
++    );
+     assert_eq!(format_with_id_default(-1000.5, 4).unwrap(), "-1,000.50");
+ }
+ 
+@@ -127,8 +130,8 @@ fn test_invalid_format_ids() {
+ #[test]
  fn test_all_defined_format_ids() {
      let defined_ids = vec![
-         0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+-        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
 -        37, 38, 39, 40, 45, 46, 47, 48, 49,
-+        37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
++        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 37, 38, 39, 40, 41,
++        42, 43, 44, 45, 46, 47, 48, 49,
      ];
-
+ 
      for id in defined_ids {
-@@ -153,4 +153,21 @@ fn test_accounting_formats() {
+@@ -137,7 +140,11 @@ fn test_all_defined_format_ids() {
+ 
+         // Verify we can parse and use the format code
+         let code_str = code.unwrap();
+-        assert!(!code_str.is_empty(), "Format code for ID {} should not be empty", id);
++        assert!(
++            !code_str.is_empty(),
++            "Format code for ID {} should not be empty",
++            id
++        );
+     }
+ }
+ 
+@@ -153,4 +160,21 @@ fn test_accounting_formats() {
      // Negative with red color
      let code = format_code_from_id(38).unwrap();
      assert_eq!(code, "#,##0 ;[Red](#,##0)");

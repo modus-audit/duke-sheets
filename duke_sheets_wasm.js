@@ -341,6 +341,27 @@ export class Workbook {
         }
     }
     /**
+     * Resolve a drawing color to display RGB (`RRGGBB` hex) against
+     * this workbook's theme palette. `auto` has no fixed RGB and
+     * resolves to `null`.
+     * @param {any} color
+     * @returns {string | undefined}
+     */
+    resolveColor(color) {
+        const ret = wasm.workbook_resolveColor(this.__wbg_ptr, color);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
+     * Save the first sheet as a CSV string, with form-control state
+     * synchronized into linked cells in the output.
      * @returns {string}
      */
     saveCsvString() {
@@ -362,7 +383,8 @@ export class Workbook {
         }
     }
     /**
-     * Save the workbook as encrypted XLS bytes. `profile` selects
+     * Save the workbook as encrypted XLS bytes after synchronizing
+     * form-control state into linked cells. `profile` selects
      * the FilePass variant; `null` defaults to RC4 CryptoAPI 128.
      * Valid values: `"rc4-cryptoapi"`, `"rc4-legacy"`, `"xor"`.
      * `keyBits` controls RC4 CryptoAPI key size (40 or 128). XOR is
@@ -386,6 +408,8 @@ export class Workbook {
         return v3;
     }
     /**
+     * Save XLSB bytes with form-control state synchronized into linked cells,
+     * replacing existing values and formulas in the output.
      * @returns {Uint8Array}
      */
     saveXlsbBytes() {
@@ -398,6 +422,8 @@ export class Workbook {
         return v1;
     }
     /**
+     * Save XLSX bytes with form-control state synchronized into linked cells,
+     * replacing existing values and formulas in the output.
      * @returns {Uint8Array}
      */
     saveXlsxBytes() {
@@ -410,7 +436,8 @@ export class Workbook {
         return v1;
     }
     /**
-     * Save the workbook as encrypted XLSX bytes. `profile` selects
+     * Save the workbook as encrypted XLSX bytes after synchronizing
+     * form-control state into linked cells. `profile` selects
      * the encryption variant; passing `null`/`undefined` uses the
      * Agile-256 default. Valid values: `"agile"`, `"standard"`.
      * `keyBits` and `spinCount` override the defaults where the
@@ -433,6 +460,15 @@ export class Workbook {
         var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v3;
+    }
+    /**
+     * @param {any} protection
+     */
+    setWorkbookProtection(protection) {
+        const ret = wasm.workbook_setWorkbookProtection(this.__wbg_ptr, protection);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @returns {any}
@@ -490,6 +526,35 @@ export class Workbook {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Project all form-control state into linked cells.
+     * @returns {number}
+     */
+    syncFormControls() {
+        const ret = wasm.workbook_syncFormControls(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Drive controls from formula-backed linked cells.
+     * @returns {number}
+     */
+    syncFormControlsFromLinkedCells() {
+        const ret = wasm.workbook_syncFormControlsFromLinkedCells(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * The workbook theme's 12 clrScheme colors as `RRGGBB` hex, in
+     * theme-index order (background 1, text 1, background 2, text 2,
+     * accent 1-6, hyperlink, followed hyperlink). The Office default
+     * palette when the file carries no theme.
+     * @returns {string[]}
+     */
+    get themePalette() {
+        const ret = wasm.workbook_themePalette(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     get totalSheetCount() {
@@ -498,6 +563,16 @@ export class Workbook {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ret[0] >>> 0;
+    }
+    /**
+     * @returns {any}
+     */
+    get workbookProtection() {
+        const ret = wasm.workbook_workbookProtection(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
 }
 if (Symbol.dispose) Workbook.prototype[Symbol.dispose] = Workbook.prototype.free;
@@ -519,6 +594,18 @@ export class Worksheet {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_worksheet_free(ptr, 0);
+    }
+    /**
+     * Append a top-level drawing and return its z-order index.
+     * @param {any} input
+     * @returns {number}
+     */
+    addDrawing(input) {
+        const ret = wasm.worksheet_addDrawing(this.__wbg_ptr, input);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
     }
     /**
      * @returns {any}
@@ -561,6 +648,7 @@ export class Worksheet {
         return ret[0] >>> 0;
     }
     /**
+     * All standard charts in depth-first drawing order.
      * @returns {any}
      */
     get charts() {
@@ -571,6 +659,7 @@ export class Worksheet {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * All ChartEx charts in depth-first drawing order.
      * @returns {any}
      */
     get chartsEx() {
@@ -691,6 +780,69 @@ export class Worksheet {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ret[0];
+    }
+    /**
+     * Return image bytes for an image drawing without copying them into metadata getters.
+     * @param {any} path
+     * @returns {Uint8Array}
+     */
+    drawingImageData(path) {
+        const ret = wasm.worksheet_drawingImageData(this.__wbg_ptr, path);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * Return an image drawing's SVG companion bytes, when present.
+     * @param {any} path
+     * @returns {Uint8Array | undefined}
+     */
+    drawingSvgData(path) {
+        const ret = wasm.worksheet_drawingSvgData(this.__wbg_ptr, path);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
+     * The recursive drawing tree in top-level z-order.
+     * @returns {any}
+     */
+    get drawings() {
+        const ret = wasm.worksheet_drawings(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get formControlCount() {
+        const ret = wasm.worksheet_formControlCount(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * All form controls in depth-first drawing order.
+     * @returns {any}
+     */
+    get formControls() {
+        const ret = wasm.worksheet_formControls(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @returns {any}
@@ -1074,6 +1226,7 @@ export class Worksheet {
         return ret[0] >>> 0;
     }
     /**
+     * All embedded images in depth-first drawing order, without image bytes.
      * @returns {any}
      */
     get images() {
@@ -1082,6 +1235,17 @@ export class Worksheet {
             throw takeFromExternrefTable0(ret[1]);
         }
         return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Insert a top-level drawing at a z-order index.
+     * @param {number} index
+     * @param {any} input
+     */
+    insertDrawing(index, input) {
+        const ret = wasm.worksheet_insertDrawing(this.__wbg_ptr, index, input);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @param {number} col
@@ -1205,6 +1369,17 @@ export class Worksheet {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Move a top-level drawing to another z-order index.
+     * @param {number} from
+     * @param {number} to
+     */
+    moveDrawing(from, to) {
+        const ret = wasm.worksheet_moveDrawing(this.__wbg_ptr, from, to);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @returns {string}
      */
     get name() {
@@ -1253,12 +1428,32 @@ export class Worksheet {
     /**
      * @returns {any}
      */
+    get protectedRanges() {
+        const ret = wasm.worksheet_protectedRanges(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {any}
+     */
     get protection() {
         const ret = wasm.worksheet_protection(this.__wbg_ptr);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
         return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Remove a top-level drawing or nested group child.
+     * @param {any} path
+     */
+    removeDrawing(path) {
+        const ret = wasm.worksheet_removeDrawing(this.__wbg_ptr, path);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @returns {Uint32Array | undefined}
@@ -1323,6 +1518,29 @@ export class Worksheet {
         }
     }
     /**
+     * @param {string} address
+     * @param {any} style
+     */
+    setCellStyle(address, style) {
+        const ptr0 = passStringToWasm0(address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worksheet_setCellStyle(this.__wbg_ptr, ptr0, len0, style);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {number} row
+     * @param {number} col
+     * @param {any} style
+     */
+    setCellStyleAt(row, col, style) {
+        const ret = wasm.worksheet_setCellStyleAt(this.__wbg_ptr, row, col, style);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {number} col
      * @param {number} width
      */
@@ -1331,6 +1549,32 @@ export class Worksheet {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Replace a top-level drawing or nested group child.
+     * @param {any} path
+     * @param {any} input
+     */
+    setDrawing(path, input) {
+        const ret = wasm.worksheet_setDrawing(this.__wbg_ptr, path, input);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Apply Excel checkbox/radio semantics and synchronize linked cells immediately.
+     * @param {any} path
+     * @param {string} state
+     * @returns {any}
+     */
+    setFormControlCheckState(path, state) {
+        const ptr0 = passStringToWasm0(state, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worksheet_setFormControlCheckState(this.__wbg_ptr, path, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @param {string} address
@@ -1342,6 +1586,36 @@ export class Worksheet {
         const ptr1 = passStringToWasm0(formula, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.worksheet_setFormula(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {any} ranges
+     */
+    setProtectedRanges(ranges) {
+        const ret = wasm.worksheet_setProtectedRanges(this.__wbg_ptr, ranges);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {any} protection
+     */
+    setProtection(protection) {
+        const ret = wasm.worksheet_setProtection(this.__wbg_ptr, protection);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {string} range_str
+     * @param {any} style
+     */
+    setRangeStyle(range_str, style) {
+        const ptr0 = passStringToWasm0(range_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.worksheet_setRangeStyle(this.__wbg_ptr, ptr0, len0, style);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -1571,6 +1845,10 @@ function __wbg_get_imports() {
             const ret = arg0.done;
             return ret;
         },
+        __wbg_entries_58c7934c745daac7: function(arg0) {
+            const ret = Object.entries(arg0);
+            return ret;
+        },
         __wbg_getRandomValues_1c61fac11405ffdc: function() { return handleError(function (arg0, arg1) {
             globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },
@@ -1601,6 +1879,16 @@ function __wbg_get_imports() {
             let result;
             try {
                 result = arg0 instanceof ArrayBuffer;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
+        __wbg_instanceof_Map_53af74335dec57f4: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Map;
             } catch (_) {
                 result = false;
             }
@@ -1657,6 +1945,10 @@ function __wbg_get_imports() {
             const ret = new Array();
             return ret;
         },
+        __wbg_new_dca287b076112a51: function() {
+            const ret = new Map();
+            return ret;
+        },
         __wbg_new_dd2b680c8bf6ae29: function(arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
@@ -1699,6 +1991,10 @@ function __wbg_get_imports() {
             const ret = module.require;
             return ret;
         }, arguments); },
+        __wbg_set_1eb0999cf5d27fc8: function(arg0, arg1, arg2) {
+            const ret = arg0.set(arg1, arg2);
+            return ret;
+        },
         __wbg_set_3f1d0b984ed272ed: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
         },

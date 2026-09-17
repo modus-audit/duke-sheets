@@ -1,10 +1,14 @@
-# @dukelib/sheets-wasm — Modus fork (built artifact)
+# Modus browser WASM distribution
 
-This orphan branch holds the **built** WASM package consumed by peasebell as a git dependency.
-It adds an `externalFnFn(name, args) -> value | null` host callback so the engine resolves
-`[N]!FN(args)` CCH add-in calls (TBLink/CLIENTNAME/…) during `calculate()`, keeping formula text
-pure. It also recognizes Excel built-in accounting number formats 41–44. With no callback (or a
-declined call) it returns the cell's cached value (strict superset).
+Version `0.1.23-modus.1`, built from [source `0cd29984a9b597224eefea6c6473c0d178e727ef`](https://github.com/modus-audit/duke-sheets/commit/0cd29984a9b597224eefea6c6473c0d178e727ef) on upstream `wasm-v0.1.23`.
 
-Source of the Modus-specific change: `SOURCE.patch`, generated from `main...modus-tb`. Rebuild with
-`wasm-pack build --release --target web` in `bindings/wasm`. Consumed via tag `wasm-dist-<ver>`.
+Preserves the Modus accounting formats 41–44 and Excel-compatible floating-point cancellation. The upstream release supplies the external add-in callback and cached-value handling. `SOURCE.patch` contains the complete changes from upstream.
+
+Build from the linked source revision with:
+
+```sh
+wasm-pack build bindings/wasm --target web --out-dir pkg --release
+node bindings/wasm/package-modus.mjs
+```
+
+The package manifest records the source revision. Native formula and number-format regression tests live in the source repository; browser integration tests live in `peasebell/e2e/tests/xlsx`.
