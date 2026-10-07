@@ -2,7 +2,7 @@
   "name": "@dukelib/sheets-wasm",
   "type": "module",
   "description": "WebAssembly bindings for duke-sheets - high-performance Excel library",
-  "version": "0.1.23-modus.1",
+  "version": "0.1.23-modus.2",
   "license": "MIT",
   "files": [
     "duke_sheets_wasm_bg.wasm",
@@ -19,5 +19,5 @@
     "url": "https://github.com/modus-audit/duke-sheets.git",
     "directory": "bindings/wasm"
   },
-  "modusSource": "e7832952e19b2b4016df292aa24aa2e80d3209b1"
+  "modusSource": "c1a54fff42584741c9bab33f563d1d7bc048b135"
 }

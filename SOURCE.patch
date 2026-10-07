@@ -1,45 +1,465 @@
+diff --git a/.github/workflows/fuzz.yml b/.github/workflows/fuzz.yml
+index 87568a0..e3934f8 100644
+--- a/.github/workflows/fuzz.yml
++++ b/.github/workflows/fuzz.yml
+@@ -32,6 +32,6 @@ jobs:
+         run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+       - name: Smoke-run reader and parser targets
+         run: |
+-          for target in cfb_reader xls_obj vml_controls xlsb_tokens xlsb_reader xls_reader xlsx_reader formula_parser; do
++          for target in cfb_reader xlsb_tokens xlsb_reader xls_reader xlsx_reader formula_parser; do
+             cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=30
+           done
+diff --git a/.github/workflows/nodejs.yml b/.github/workflows/nodejs.yml
+index ffdc5df..43463fb 100644
+--- a/.github/workflows/nodejs.yml
++++ b/.github/workflows/nodejs.yml
+@@ -26,25 +26,25 @@ jobs:
+         settings:
+           - host: ubuntu-latest
+             target: x86_64-unknown-linux-gnu
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target x86_64-unknown-linux-gnu --use-napi-cross
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target x86_64-unknown-linux-gnu --use-napi-cross
+           - host: ubuntu-latest
+             target: aarch64-unknown-linux-gnu
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target aarch64-unknown-linux-gnu --use-napi-cross
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target aarch64-unknown-linux-gnu --use-napi-cross
+           - host: ubuntu-latest
+             target: x86_64-unknown-linux-musl
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target x86_64-unknown-linux-musl -x
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target x86_64-unknown-linux-musl -x
+           - host: ubuntu-latest
+             target: aarch64-unknown-linux-musl
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target aarch64-unknown-linux-musl -x
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target aarch64-unknown-linux-musl -x
+           - host: macos-latest
+             target: x86_64-apple-darwin
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target x86_64-apple-darwin
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target x86_64-apple-darwin
+           - host: macos-latest
+             target: aarch64-apple-darwin
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target aarch64-apple-darwin
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target aarch64-apple-darwin
+           - host: windows-latest
+             target: x86_64-pc-windows-msvc
+-            build: npx napi build --platform --release --js index.js --dts generated.d.ts --no-const-enum --target x86_64-pc-windows-msvc
++            build: npx napi build --platform --release --js index.js --dts index.d.ts --target x86_64-pc-windows-msvc
+ 
+     name: Build - ${{ matrix.settings.target }}
+     runs-on: ${{ matrix.settings.host }}
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+deleted file mode 100644
+index d76e2a5..0000000
+--- a/.github/workflows/release.yml
++++ /dev/null
+@@ -1,278 +0,0 @@
+-name: Release
+-
+-run-name: "Release: node=${{ inputs.node }}, python=${{ inputs.python }}, wasm=${{ inputs.wasm }}${{ inputs.dry_run && ' (dry run)' || '' }}"
+-
+-on:
+-  workflow_dispatch:
+-    inputs:
+-      node:
+-        description: "Node.js (@dukelib/sheets)"
+-        type: choice
+-        options: [patch, minor, major, skip]
+-        default: patch
+-      python:
+-        description: "Python (duke-sheets)"
+-        type: choice
+-        options: [patch, minor, major, skip]
+-        default: patch
+-      wasm:
+-        description: "WASM (@dukelib/sheets-wasm)"
+-        type: choice
+-        options: [patch, minor, major, skip]
+-        default: patch
+-      dry_run:
+-        description: "Dry run: bump and commit locally, but do not push or publish"
+-        type: boolean
+-        default: false
+-
+-permissions:
+-  contents: write
+-  actions: write
+-
+-concurrency:
+-  group: release
+-  cancel-in-progress: false
+-
+-jobs:
+-  release:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - uses: actions/checkout@v6
+-
+-      # Tool versions pinned in mise.toml, matching local dev. Only the
+-      # tools this job needs; dotnet and wasm-pack are skipped.
+-      - uses: jdx/mise-action@v4
+-        with:
+-          install_args: node uv rust
+-
+-      - name: Compute versions
+-        id: versions
+-        env:
+-          INPUT_NODE: ${{ inputs.node }}
+-          INPUT_PYTHON: ${{ inputs.python }}
+-          INPUT_WASM: ${{ inputs.wasm }}
+-        run: |
+-          set -euo pipefail
+-
+-          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+-            echo "::error::Releases must be run from main (got $GITHUB_REF)"
+-            exit 1
+-          fi
+-
+-          bump() {
+-            local ver=$1 kind=$2 major minor patch
+-            IFS=. read -r major minor patch <<< "$ver"
+-            case "$kind" in
+-              major) echo "$((major + 1)).0.0" ;;
+-              minor) echo "${major}.$((minor + 1)).0" ;;
+-              patch) echo "${major}.${minor}.$((patch + 1))" ;;
+-            esac
+-          }
+-
+-          tags=()
+-
+-          if [[ "$INPUT_NODE" != "skip" ]]; then
+-            cur=$(node -p "require('./bindings/nodejs/package.json').version")
+-            new=$(bump "$cur" "$INPUT_NODE")
+-            echo "node: $cur -> $new"
+-            { echo "node_cur=$cur"; echo "node_new=$new"; } >> "$GITHUB_OUTPUT"
+-            tags+=("node-v$new")
+-          fi
+-
+-          if [[ "$INPUT_PYTHON" != "skip" ]]; then
+-            cur=$(grep -m1 '^version = ' bindings/python/pyproject.toml | cut -d'"' -f2)
+-            cur_cargo=$(grep -m1 '^version = ' bindings/python/Cargo.toml | cut -d'"' -f2)
+-            if [[ "$cur" != "$cur_cargo" ]]; then
+-              echo "::error::bindings/python pyproject.toml ($cur) and Cargo.toml ($cur_cargo) versions disagree"
+-              exit 1
+-            fi
+-            new=$(bump "$cur" "$INPUT_PYTHON")
+-            echo "python: $cur -> $new"
+-            { echo "python_cur=$cur"; echo "python_new=$new"; } >> "$GITHUB_OUTPUT"
+-            tags+=("python-v$new")
+-          fi
+-
+-          if [[ "$INPUT_WASM" != "skip" ]]; then
+-            cur=$(grep -m1 '^version = ' bindings/wasm/Cargo.toml | cut -d'"' -f2)
+-            new=$(bump "$cur" "$INPUT_WASM")
+-            echo "wasm: $cur -> $new"
+-            { echo "wasm_cur=$cur"; echo "wasm_new=$new"; } >> "$GITHUB_OUTPUT"
+-            tags+=("wasm-v$new")
+-          fi
+-
+-          if [[ ${#tags[@]} -eq 0 ]]; then
+-            echo "::error::Nothing to release: all bindings set to skip"
+-            exit 1
+-          fi
+-
+-          for tag in "${tags[@]}"; do
+-            if git ls-remote --exit-code origin "refs/tags/$tag" > /dev/null; then
+-              echo "::error::Tag $tag already exists"
+-              exit 1
+-            fi
+-          done
+-
+-          echo "tags=${tags[*]}" >> "$GITHUB_OUTPUT"
+-
+-      - name: Bump Node.js
+-        if: inputs.node != 'skip'
+-        working-directory: bindings/nodejs
+-        env:
+-          CUR: ${{ steps.versions.outputs.node_cur }}
+-          NEW: ${{ steps.versions.outputs.node_new }}
+-        run: |
+-          set -euo pipefail
+-          npm ci
+-          npm version "$NEW" --no-git-tag-version
+-          npx napi version
+-
+-          # index.js is generated by napi build with the package version
+-          # stamped into its platform-package checks; restamp it in place
+-          # instead of running a full native build.
+-          stray=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' index.js | grep -vxF "$CUR" | sort -u || true)
+-          if [[ -n "$stray" ]]; then
+-            echo "::error::index.js contains unexpected version strings: $stray"
+-            exit 1
+-          fi
+-          count=$(grep -cF "$CUR" index.js)
+-          sed -i "s/${CUR//./\\.}/$NEW/g" index.js
+-          if grep -qF "$CUR" index.js || [[ $(grep -cF "$NEW" index.js) -ne $count ]]; then
+-            echo "::error::Failed to restamp index.js from $CUR to $NEW"
+-            exit 1
+-          fi
+-          echo "Restamped $count occurrences in index.js"
+-
+-      - name: Bump Python
+-        if: inputs.python != 'skip'
+-        env:
+-          NEW: ${{ steps.versions.outputs.python_new }}
+-        run: |
+-          set -euo pipefail
+-          sed -i "s/^version = \"[^\"]*\"/version = \"$NEW\"/" \
+-            bindings/python/Cargo.toml bindings/python/pyproject.toml
+-          cargo update --workspace --manifest-path bindings/python/Cargo.toml
+-          uv lock --project bindings/python
+-
+-      - name: Bump WASM
+-        if: inputs.wasm != 'skip'
+-        env:
+-          NEW: ${{ steps.versions.outputs.wasm_new }}
+-        run: |
+-          set -euo pipefail
+-          sed -i "s/^version = \"[^\"]*\"/version = \"$NEW\"/" bindings/wasm/Cargo.toml
+-          cargo update --workspace --manifest-path bindings/wasm/Cargo.toml
+-
+-      - name: Commit and tag
+-        env:
+-          NODE_NEW: ${{ steps.versions.outputs.node_new }}
+-          PYTHON_NEW: ${{ steps.versions.outputs.python_new }}
+-          WASM_NEW: ${{ steps.versions.outputs.wasm_new }}
+-          TAGS: ${{ steps.versions.outputs.tags }}
+-        run: |
+-          set -euo pipefail
+-          git config user.name "github-actions[bot]"
+-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+-
+-          parts=()
+-          if [[ -n "$NODE_NEW" ]]; then
+-            git add bindings/nodejs/package.json bindings/nodejs/package-lock.json \
+-              bindings/nodejs/index.js bindings/nodejs/npm/*/package.json
+-            parts+=("node $NODE_NEW")
+-          fi
+-          if [[ -n "$PYTHON_NEW" ]]; then
+-            git add bindings/python/Cargo.toml bindings/python/pyproject.toml \
+-              bindings/python/Cargo.lock bindings/python/uv.lock
+-            parts+=("python $PYTHON_NEW")
+-          fi
+-          if [[ -n "$WASM_NEW" ]]; then
+-            git add bindings/wasm/Cargo.toml bindings/wasm/Cargo.lock
+-            parts+=("wasm $WASM_NEW")
+-          fi
+-
+-          if ! git diff --quiet; then
+-            echo "::error::Unstaged changes remain after staging release files:"
+-            git diff --stat
+-            exit 1
+-          fi
+-
+-          msg="release:"
+-          sep=" "
+-          for part in "${parts[@]}"; do
+-            msg+="$sep$part"
+-            sep=", "
+-          done
+-
+-          git commit -m "$msg"
+-          read -ra tags <<< "$TAGS"
+-          for tag in "${tags[@]}"; do
+-            git tag "$tag"
+-          done
+-          git show --stat HEAD
+-
+-      - name: Push
+-        if: ${{ !inputs.dry_run }}
+-        env:
+-          TAGS: ${{ steps.versions.outputs.tags }}
+-        run: |
+-          set -euo pipefail
+-          read -ra tags <<< "$TAGS"
+-          refs=()
+-          for tag in "${tags[@]}"; do
+-            refs+=("refs/tags/$tag")
+-          done
+-          git push --atomic origin main "${refs[@]}"
+-
+-      - name: Trigger publish workflows
+-        if: ${{ !inputs.dry_run }}
+-        env:
+-          GH_TOKEN: ${{ github.token }}
+-          NODE_NEW: ${{ steps.versions.outputs.node_new }}
+-          PYTHON_NEW: ${{ steps.versions.outputs.python_new }}
+-          WASM_NEW: ${{ steps.versions.outputs.wasm_new }}
+-        run: |
+-          set -euo pipefail
+-          # Tags pushed with GITHUB_TOKEN do not trigger tag workflows, so
+-          # dispatch them on the tag refs; github.ref then matches the
+-          # refs/tags/* conditions in their release jobs.
+-          if [[ -n "$NODE_NEW" ]]; then
+-            gh workflow run nodejs.yml --ref "node-v$NODE_NEW"
+-          fi
+-          if [[ -n "$PYTHON_NEW" ]]; then
+-            gh workflow run python.yml --ref "python-v$PYTHON_NEW"
+-          fi
+-          if [[ -n "$WASM_NEW" ]]; then
+-            gh workflow run wasm.yml --ref "wasm-v$WASM_NEW"
+-          fi
+-
+-      - name: Summary
+-        env:
+-          DRY_RUN: ${{ inputs.dry_run }}
+-          NODE_CUR: ${{ steps.versions.outputs.node_cur }}
+-          NODE_NEW: ${{ steps.versions.outputs.node_new }}
+-          PYTHON_CUR: ${{ steps.versions.outputs.python_cur }}
+-          PYTHON_NEW: ${{ steps.versions.outputs.python_new }}
+-          WASM_CUR: ${{ steps.versions.outputs.wasm_cur }}
+-          WASM_NEW: ${{ steps.versions.outputs.wasm_new }}
+-        run: |
+-          set -euo pipefail
+-          {
+-            if [[ "$DRY_RUN" == "true" ]]; then
+-              echo "## Release (dry run - nothing pushed)"
+-            else
+-              echo "## Release"
+-            fi
+-            echo ""
+-            if [[ -n "$NODE_NEW" ]]; then
+-              echo "- node: $NODE_CUR -> $NODE_NEW ([nodejs.yml runs]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/nodejs.yml))"
+-            fi
+-            if [[ -n "$PYTHON_NEW" ]]; then
+-              echo "- python: $PYTHON_CUR -> $PYTHON_NEW ([python.yml runs]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/python.yml))"
+-            fi
+-            if [[ -n "$WASM_NEW" ]]; then
+-              echo "- wasm: $WASM_CUR -> $WASM_NEW ([wasm.yml runs]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/wasm.yml))"
+-            fi
+-            echo ""
+-            echo '```'
+-            git show --stat HEAD
+-            echo '```'
+-          } >> "$GITHUB_STEP_SUMMARY"
 diff --git a/MODUS_PATCHES.md b/MODUS_PATCHES.md
 new file mode 100644
-index 0000000..30e21dd
+index 0000000..b00cb7f
 --- /dev/null
 +++ b/MODUS_PATCHES.md
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,13 @@
 +# Modus viewer engine
 +
 +Based on upstream `wasm-v0.1.23` (`b30fff867622703f71edea6be16f20a2d4f96193`).
 +
 +The Modus patches preserve built-in accounting formats 41–44 in both format registries and cancel floating-point reconciliation residue without rounding real differences or exact integer subtraction. External add-in callbacks and cached unresolved values now come from upstream.
 +
++The browser build leaves out the engine's `parallel` feature. Browser WebAssembly has no threads, so the rayon thread pool the engine builds at 5,000 or more formulas panicked into an `unreachable` trap and poisoned the workbook; without the feature every calculation takes the serial path.
++
 +Validate with `cargo test -p ssfmt -p duke-sheets-core` and `cargo test -p duke-sheets --test formula_evaluation`.
 +
-+Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.1`. The generated manifest records the exact source commit. Never move an existing distribution tag.
++Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.N` (next unused N). The generated manifest records the exact source commit. Never move an existing distribution tag.
 +
 +The application-level regression suite in `peasebell/e2e/tests/xlsx` exercises the packaged WASM through both the main-thread and worker viewer paths.
 diff --git a/bindings/wasm/Cargo.lock b/bindings/wasm/Cargo.lock
-index fbc4e1c..d666d8a 100644
+index fbc4e1c..c100277 100644
 --- a/bindings/wasm/Cargo.lock
 +++ b/bindings/wasm/Cargo.lock
-@@ -503,7 +503,7 @@ dependencies = [
+@@ -296,25 +296,6 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
+-[[package]]
+-name = "crossbeam-deque"
+-version = "0.8.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+-dependencies = [
+- "crossbeam-epoch",
+- "crossbeam-utils",
+-]
+-
+-[[package]]
+-name = "crossbeam-epoch"
+-version = "0.9.18"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+-dependencies = [
+- "crossbeam-utils",
+-]
+-
+ [[package]]
+ name = "crossbeam-utils"
+ version = "0.8.21"
+@@ -422,7 +403,6 @@ dependencies = [
+  "duke-sheets-xls",
+  "duke-sheets-xlsb",
+  "duke-sheets-xlsx",
+- "rayon",
+  "thiserror 1.0.69",
+  "zip",
+ ]
+@@ -503,7 +483,7 @@ dependencies = [
  
  [[package]]
  name = "duke-sheets-wasm"
 -version = "0.1.23"
-+version = "0.1.23-modus.1"
++version = "0.1.23-modus.2"
  dependencies = [
   "chrono",
   "duke-sheets",
+@@ -570,12 +550,6 @@ dependencies = [
+  "zip",
+ ]
+ 
+-[[package]]
+-name = "either"
+-version = "1.15.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+-
+ [[package]]
+ name = "encoding_rs"
+ version = "0.8.35"
+@@ -1052,26 +1026,6 @@ dependencies = [
+  "getrandom 0.2.17",
+ ]
+ 
+-[[package]]
+-name = "rayon"
+-version = "1.11.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+-dependencies = [
+- "either",
+- "rayon-core",
+-]
+-
+-[[package]]
+-name = "rayon-core"
+-version = "1.13.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+-dependencies = [
+- "crossbeam-deque",
+- "crossbeam-utils",
+-]
+-
+ [[package]]
+ name = "rc4"
+ version = "0.2.0"
 diff --git a/bindings/wasm/Cargo.toml b/bindings/wasm/Cargo.toml
-index 41a982f..322aa1d 100644
+index 41a982f..4f4ab55 100644
 --- a/bindings/wasm/Cargo.toml
 +++ b/bindings/wasm/Cargo.toml
 @@ -1,6 +1,6 @@
  [package]
  name = "duke-sheets-wasm"
 -version = "0.1.23"
-+version = "0.1.23-modus.1"
++version = "0.1.23-modus.2"
  edition = "2021"
  description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
  license = "MIT"
+@@ -10,7 +10,9 @@ publish = false
+ crate-type = ["cdylib", "rlib"]
+ 
+ [dependencies]
+-duke-sheets = { path = "../../crates/duke-sheets", features = ["full"] }
++# Everything in "full" except "parallel": browser WebAssembly has no threads, so the rayon
++# path the engine takes at 5,000+ formulas panics (`unreachable`). Serial evaluation is used instead.
++duke-sheets = { path = "../../crates/duke-sheets", default-features = false, features = ["xlsx", "xls", "xlsb", "csv"] }
+ duke-sheets-core = { path = "../../crates/duke-sheets-core" }
+ duke-sheets-crypto = { path = "../../crates/duke-sheets-crypto" }
+ duke-sheets-csv = { path = "../../crates/duke-sheets-csv" }
 diff --git a/bindings/wasm/package-modus.mjs b/bindings/wasm/package-modus.mjs
 new file mode 100644
 index 0000000..a642b29
