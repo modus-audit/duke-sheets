@@ -1,6 +1,6 @@
 [package]
 name = "duke-sheets-wasm"
-version = "0.1.23-modus.1"
+version = "0.1.23-modus.2"
 edition = "2021"
 description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
 license = "MIT"
@@ -10,7 +10,9 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-duke-sheets = { path = "../../crates/duke-sheets", features = ["full"] }
+# Everything in "full" except "parallel": browser WebAssembly has no threads, so the rayon
+# path the engine takes at 5,000+ formulas panics (`unreachable`). Serial evaluation is used instead.
+duke-sheets = { path = "../../crates/duke-sheets", default-features = false, features = ["xlsx", "xls", "xlsb", "csv"] }
 duke-sheets-core = { path = "../../crates/duke-sheets-core" }
 duke-sheets-crypto = { path = "../../crates/duke-sheets-crypto" }
 duke-sheets-csv = { path = "../../crates/duke-sheets-csv" }
