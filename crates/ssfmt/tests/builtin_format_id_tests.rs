@@ -1,4 +1,4 @@
-use ssfmt::{format_with_id_default, format_code_from_id};
+use ssfmt::{format_code_from_id, format_with_id_default};
 
 /// Test built-in format ID 0 (General)
 #[test]
@@ -49,7 +49,10 @@ fn test_format_id_3_thousands() {
 fn test_format_id_4_thousands_decimals() {
     assert_eq!(format_with_id_default(0.0, 4).unwrap(), "0.00");
     assert_eq!(format_with_id_default(1234.56, 4).unwrap(), "1,234.56");
-    assert_eq!(format_with_id_default(1234567.89, 4).unwrap(), "1,234,567.89");
+    assert_eq!(
+        format_with_id_default(1234567.89, 4).unwrap(),
+        "1,234,567.89"
+    );
     assert_eq!(format_with_id_default(-1000.5, 4).unwrap(), "-1,000.50");
 }
 
@@ -127,8 +130,8 @@ fn test_invalid_format_ids() {
 #[test]
 fn test_all_defined_format_ids() {
     let defined_ids = vec![
-        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-        37, 38, 39, 40, 45, 46, 47, 48, 49,
+        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 37, 38, 39, 40, 41,
+        42, 43, 44, 45, 46, 47, 48, 49,
     ];
 
     for id in defined_ids {
@@ -137,7 +140,11 @@ fn test_all_defined_format_ids() {
 
         // Verify we can parse and use the format code
         let code_str = code.unwrap();
-        assert!(!code_str.is_empty(), "Format code for ID {} should not be empty", id);
+        assert!(
+            !code_str.is_empty(),
+            "Format code for ID {} should not be empty",
+            id
+        );
     }
 }
 
@@ -153,4 +160,21 @@ fn test_accounting_formats() {
     // Negative with red color
     let code = format_code_from_id(38).unwrap();
     assert_eq!(code, "#,##0 ;[Red](#,##0)");
+
+    assert_eq!(
+        format_code_from_id(41),
+        Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(42),
+        Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(43),
+        Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
+    );
+    assert_eq!(
+        format_code_from_id(44),
+        Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
+    );
 }

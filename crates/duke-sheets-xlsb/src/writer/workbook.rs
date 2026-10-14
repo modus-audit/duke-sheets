@@ -17,6 +17,7 @@ pub(crate) fn write_workbook<W: Write + Seek>(
     workbook: &Workbook,
     has_formulas: bool,
     xlfn_names: &HashMap<String, u32>,
+    external_names: &[String],
 ) -> XlsbResult<()> {
     zip.start_file("xl/workbook.bin", *options)?;
     let mut buf = Vec::new();
@@ -35,6 +36,23 @@ pub(crate) fn write_workbook<W: Write + Seek>(
     wb_prop.extend_from_slice(&0u32.to_le_bytes());
     wb_prop.extend_from_slice(&encode_wide_str(""));
     rw.write_record(records::BRT_WB_PROP, &wb_prop)?;
+
+    if let Some(protection) = workbook.workbook_protection() {
+        if protection.structure || protection.windows || protection.password_hash.is_some() {
+            let mut payload = Vec::with_capacity(6);
+            payload.extend_from_slice(&protection.password_hash.unwrap_or(0).to_le_bytes());
+            payload.extend_from_slice(&0u16.to_le_bytes()); // revision protection password
+            let mut flags: u16 = 0;
+            if protection.structure {
+                flags |= 0x0001;
+            }
+            if protection.windows {
+                flags |= 0x0002;
+            }
+            payload.extend_from_slice(&flags.to_le_bytes());
+            rw.write_record(records::BRT_BOOK_PROTECTION, &payload)?;
+        }
+    }
 
     write_book_views(&mut rw, workbook.active_sheet())?;
 
@@ -68,7 +86,7 @@ pub(crate) fn write_workbook<W: Write + Seek>(
     });
 
     if has_formulas || has_user_names || has_print_settings {
-        write_extern_sheet(&mut rw, workbook.sheet_count())?;
+        write_extern_sheet(&mut rw, workbook.sheet_count(), external_names)?;
     }
 
     if !xlfn_names.is_empty() {
@@ -136,9 +154,9 @@ fn write_xlfn_name_records<W: Write>(
         payload.extend_from_slice(&encode_wide_str(&prefixed));
         payload.extend_from_slice(&0u32.to_le_bytes()); // cce (rgce size = 0)
         payload.extend_from_slice(&0u32.to_le_bytes()); // cb (rgcb size = 0)
-        // Trailing strings per [MS-XLSB] §2.4.718 BrtName: the comment
-        // (XLNullableWideString), then four strings that MUST exist if
-        // and only if fProc is set. We never write macro names.
+                                                        // Trailing strings per [MS-XLSB] §2.4.718 BrtName: the comment
+                                                        // (XLNullableWideString), then four strings that MUST exist if
+                                                        // and only if fProc is set. We never write macro names.
         payload.extend_from_slice(&encode_nullable_wide_str(None));
         rw.write_record(records::BRT_NAME, &payload)?;
     }
@@ -161,6 +179,8 @@ fn write_user_name_records<W: Write>(
         xlfn_names: xlfn_names.clone(),
         defined_names: Vec::new(),
         defined_name_classes: Vec::new(),
+        external_names: HashMap::new(),
+        external_ixti: None,
     };
 
     for nr in workbook.named_ranges().iter() {
@@ -214,6 +234,8 @@ fn write_print_name_records<W: Write>(
         xlfn_names: xlfn_names.clone(),
         defined_names: Vec::new(),
         defined_name_classes: Vec::new(),
+        external_names: HashMap::new(),
+        external_ixti: None,
     };
 
     for i in 0..workbook.sheet_count() {
@@ -339,16 +361,34 @@ fn format_print_titles_formula(
 fn write_extern_sheet<W: Write>(
     rw: &mut RecordWriter<W>,
     sheet_count: usize,
+    external_names: &[String],
 ) -> std::io::Result<()> {
     rw.write_record(0x0161, &[])?; // BrtBeginExternals
+    if !external_names.is_empty() {
+        rw.write_record(records::BRT_SUP_ADDIN, &[])?;
+        for name in external_names {
+            rw.write_record(records::BRT_PLACEHOLDER_NAME, &encode_wide_str(name))?;
+        }
+    }
     rw.write_record(0x0165, &[])?; // BrtSupSelf
 
-    let count = sheet_count as u32;
-    let mut payload = Vec::with_capacity(4 + sheet_count * 12);
+    let addin_count = if external_names.is_empty() { 0 } else { 1 };
+    let count = (sheet_count + addin_count) as u32;
+    let mut payload = Vec::with_capacity(4 + (sheet_count + addin_count) * 12);
     payload.extend_from_slice(&count.to_le_bytes());
+    if !external_names.is_empty() {
+        payload.extend_from_slice(&0u32.to_le_bytes()); // supBookIdx = 0 (add-in)
+        payload.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // firstSheet = -2
+        payload.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // lastSheet = -2
+    }
+    let self_sup = if external_names.is_empty() {
+        0u32
+    } else {
+        1u32
+    };
     for i in 0..sheet_count {
         let idx = i as u32;
-        payload.extend_from_slice(&0u32.to_le_bytes()); // supBookIdx = 0 (self-ref)
+        payload.extend_from_slice(&self_sup.to_le_bytes());
         payload.extend_from_slice(&idx.to_le_bytes()); // firstSheet
         payload.extend_from_slice(&idx.to_le_bytes()); // lastSheet
     }

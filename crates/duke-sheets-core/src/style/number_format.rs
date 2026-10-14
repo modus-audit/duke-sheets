@@ -65,6 +65,10 @@ impl NumberFormat {
     pub const ID_ACCOUNTING_DEC2: u32 = 39;
     /// 40 - #,##0.00;[Red](#,##0.00)
     pub const ID_ACCOUNTING_DEC2_RED: u32 = 40;
+    pub const ID_ACCOUNTING_PADDED_INT: u32 = 41;
+    pub const ID_ACCOUNTING_DOLLAR_INT: u32 = 42;
+    pub const ID_ACCOUNTING_PADDED_DEC2: u32 = 43;
+    pub const ID_ACCOUNTING_DOLLAR_DEC2: u32 = 44;
     /// 49 - @
     pub const ID_TEXT: u32 = 49;
 
@@ -175,6 +179,10 @@ impl NumberFormat {
             38 => "#,##0_);[Red](#,##0)",
             39 => "#,##0.00_);(#,##0.00)",
             40 => "#,##0.00_);[Red](#,##0.00)",
+            41 => "_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)",
+            42 => "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)",
+            43 => "_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)",
+            44 => "_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)",
             45 => "mm:ss",
             46 => "[h]:mm:ss",
             47 => "mm:ss.0",

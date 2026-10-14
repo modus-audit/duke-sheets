@@ -31,10 +31,13 @@ pub mod cell;
 pub mod column;
 pub mod comment;
 pub mod conditional_format;
+pub mod drawing;
 pub mod error;
+pub mod form_control;
 pub mod hyperlink;
 pub mod locale;
 pub mod named_range;
+pub mod protection;
 pub mod range;
 pub mod rich_text;
 pub mod row;
@@ -50,7 +53,8 @@ pub use auto_filter::{
     Top10Filter, ValueFilter,
 };
 pub use cell::{
-    format_cell_value, CellAddress, CellData, CellError, CellRange, CellValue, CellView, FormulaData,
+    format_cell_value, CellAddress, CellData, CellError, CellRange, CellValue, CellView,
+    FormulaData,
 };
 pub use column::{Column, ColumnData};
 pub use comment::CellComment;
@@ -58,9 +62,23 @@ pub use conditional_format::{
     CfColorValue, CfOperator, CfRuleType, CfValue, CfValueType, ConditionalFormatRule,
     IconSetStyle, TimePeriod,
 };
+pub use duke_sheets_chart::RawRel;
+pub use drawing::{
+    default_comment_anchor, validate_anchor, validate_group_child, ChildTransform, CommentRef,
+    DrawingKind, DrawingMeta,
+    DrawingNodeMut, DrawingNodeRef, DrawingObject, DrawingPath, DrawingText, Group,
+    GroupChild, GroupTransform, Placed, RawDrawing, RectEmu, Shape, ShapeFill,
+    ShapeGeometry,
+    ShapeLine,
+};
 pub use error::{Error, Result};
+pub use form_control::{
+    radio_groups, CheckState, ControlText, FormControl, FormControlInteractionResult,
+    FormControlKind, ListSelection, PlacedControl,
+};
 pub use hyperlink::Hyperlink;
 pub use locale::Locale;
+pub use protection::{hash_legacy_protection_password, ProtectedRange, WorkbookProtection};
 pub use rich_text::{rich_text_to_plain, RichTextRun, RunFont};
 pub use table::{Table, TableColumn, TableStyleInfo, TotalsRowFunction};
 pub use validation::{DataValidation, ValidationErrorStyle, ValidationOperator, ValidationType};
@@ -73,7 +91,7 @@ pub use worksheet::{
 // Re-export all style types for convenience
 pub use style::{
     Alignment, BorderEdge, BorderLineStyle, BorderStyle, Color, FillStyle, FontStyle,
-    HorizontalAlignment, NumberFormat, Style, StylePool, VerticalAlignment,
+    HorizontalAlignment, NumberFormat, Style, StylePool, ThemePalette, VerticalAlignment,
 };
 
 /// Maximum number of rows in a worksheet (Excel limit)
