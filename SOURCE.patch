@@ -1,0 +1,1117 @@
+diff --git a/MODUS_PATCHES.md b/MODUS_PATCHES.md
+new file mode 100644
+index 0000000..d933d0f
+--- /dev/null
++++ b/MODUS_PATCHES.md
+@@ -0,0 +1,20 @@
++# Modus viewer engine
++
++Based on upstream `wasm-v0.1.23` (`b30fff867622703f71edea6be16f20a2d4f96193`).
++
++The Modus patches preserve built-in accounting formats 41–44 in both format registries and cancel floating-point reconciliation residue without rounding real differences or exact integer subtraction. External add-in callbacks and cached unresolved values now come from upstream.
++
++The browser build leaves out the engine's `parallel` feature. Browser WebAssembly has no threads, so the rayon thread pool the engine builds at 5,000 or more formulas panicked into an `unreachable` trap and poisoned the workbook; without the feature every calculation takes the serial path.
++
++Validate with `cargo test -p ssfmt -p duke-sheets-core` and `cargo test -p duke-sheets --test formula_evaluation`.
++
++Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.N` (next unused N). The generated manifest records the exact source commit. Never move an existing distribution tag.
++
++The application-level regression suite in `peasebell/e2e/tests/xlsx` exercises the packaged WASM through both the main-thread and worker viewer paths.
++
++## Editing scale and correctness (.3)
++
++- `storedCellCoordinates()` returns sorted, deduplicated row/column pairs for stored cells and formulas without formatting values or expanding merges.
++- Materialized range caches retain at most 16 MiB of payload per calculation pass; plain single-range SUM streams scalar values in the existing order.
++- Volatile/external roots seed transitive dependent invalidation alongside ordinary dirty inputs. The app retains full recalculation by default.
++- Regression coverage includes styled blanks/deletions, range-cache saturation, SUM value/error parity, external cross-sheet dependency closure, and 15,000 prefix SUM formulas.
+diff --git a/bindings/wasm/Cargo.lock b/bindings/wasm/Cargo.lock
+index fbc4e1c..704e7f8 100644
+--- a/bindings/wasm/Cargo.lock
++++ b/bindings/wasm/Cargo.lock
+@@ -296,25 +296,6 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
+-[[package]]
+-name = "crossbeam-deque"
+-version = "0.8.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+-dependencies = [
+- "crossbeam-epoch",
+- "crossbeam-utils",
+-]
+-
+-[[package]]
+-name = "crossbeam-epoch"
+-version = "0.9.18"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+-dependencies = [
+- "crossbeam-utils",
+-]
+-
+ [[package]]
+ name = "crossbeam-utils"
+ version = "0.8.21"
+@@ -422,7 +403,6 @@ dependencies = [
+  "duke-sheets-xls",
+  "duke-sheets-xlsb",
+  "duke-sheets-xlsx",
+- "rayon",
+  "thiserror 1.0.69",
+  "zip",
+ ]
+@@ -503,7 +483,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "duke-sheets-wasm"
+-version = "0.1.23"
++version = "0.1.23-modus.3"
+ dependencies = [
+  "chrono",
+  "duke-sheets",
+@@ -570,12 +550,6 @@ dependencies = [
+  "zip",
+ ]
+ 
+-[[package]]
+-name = "either"
+-version = "1.15.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+-
+ [[package]]
+ name = "encoding_rs"
+ version = "0.8.35"
+@@ -1052,26 +1026,6 @@ dependencies = [
+  "getrandom 0.2.17",
+ ]
+ 
+-[[package]]
+-name = "rayon"
+-version = "1.11.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+-dependencies = [
+- "either",
+- "rayon-core",
+-]
+-
+-[[package]]
+-name = "rayon-core"
+-version = "1.13.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+-dependencies = [
+- "crossbeam-deque",
+- "crossbeam-utils",
+-]
+-
+ [[package]]
+ name = "rc4"
+ version = "0.2.0"
+diff --git a/bindings/wasm/Cargo.toml b/bindings/wasm/Cargo.toml
+index 41a982f..0c3c989 100644
+--- a/bindings/wasm/Cargo.toml
++++ b/bindings/wasm/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "duke-sheets-wasm"
+-version = "0.1.23"
++version = "0.1.23-modus.3"
+ edition = "2021"
+ description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
+ license = "MIT"
+@@ -10,7 +10,9 @@ publish = false
+ crate-type = ["cdylib", "rlib"]
+ 
+ [dependencies]
+-duke-sheets = { path = "../../crates/duke-sheets", features = ["full"] }
++# Everything in "full" except "parallel": browser WebAssembly has no threads, so the rayon
++# path the engine takes at 5,000+ formulas panics (`unreachable`). Serial evaluation is used instead.
++duke-sheets = { path = "../../crates/duke-sheets", default-features = false, features = ["xlsx", "xls", "xlsb", "csv"] }
+ duke-sheets-core = { path = "../../crates/duke-sheets-core" }
+ duke-sheets-crypto = { path = "../../crates/duke-sheets-crypto" }
+ duke-sheets-csv = { path = "../../crates/duke-sheets-csv" }
+diff --git a/bindings/wasm/package-modus.mjs b/bindings/wasm/package-modus.mjs
+new file mode 100644
+index 0000000..a642b29
+--- /dev/null
++++ b/bindings/wasm/package-modus.mjs
+@@ -0,0 +1,18 @@
++import { execFileSync } from "node:child_process";
++import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
++
++const packageDirectory = new URL("./pkg/", import.meta.url);
++const packagePath = new URL("package.json", packageDirectory);
++const metadata = JSON.parse(readFileSync(packagePath, "utf8"));
++metadata.name = "@dukelib/sheets-wasm";
++metadata.repository = {
++  type: "git",
++  url: "https://github.com/modus-audit/duke-sheets.git",
++  directory: "bindings/wasm",
++};
++metadata.modusSource = execFileSync("git", ["rev-parse", "HEAD"], {
++  cwd: new URL("../../", import.meta.url),
++  encoding: "utf8",
++}).trim();
++writeFileSync(packagePath, `${JSON.stringify(metadata, null, 2)}\n`);
++copyFileSync(new URL("../../LICENSE", import.meta.url), new URL("LICENSE", packageDirectory));
+diff --git a/bindings/wasm/src/lib.rs b/bindings/wasm/src/lib.rs
+index d65219b..b3d01b6 100644
+--- a/bindings/wasm/src/lib.rs
++++ b/bindings/wasm/src/lib.rs
+@@ -989,6 +989,16 @@ impl Worksheet {
+             .map_err(to_js_error)
+     }
+ 
++    #[wasm_bindgen(js_name = clearCellStyleAt)]
++    pub fn clear_cell_style_at(&self, row: u32, col: u32) -> Result<(), JsError> {
++        let col = u16::try_from(col).map_err(|_| JsError::new("Column is outside the worksheet"))?;
++        let mut wb = self.workbook.borrow_mut();
++        let ws = wb
++            .worksheet_mut(self.sheet_index)
++            .ok_or_else(|| JsError::new("Worksheet no longer exists"))?;
++        ws.clear_cell_style_at(row, col).map_err(to_js_error)
++    }
++
+     #[wasm_bindgen(js_name = setRangeStyle)]
+     pub fn set_range_style(&self, range_str: &str, style: JsValue) -> Result<(), JsError> {
+         let patch: WasmStylePatch = serde_wasm_bindgen::from_value(style).map_err(to_js_error)?;
+diff --git a/bindings/wasm/src/worksheet_read.rs b/bindings/wasm/src/worksheet_read.rs
+index 197a5c2..8771ada 100644
+--- a/bindings/wasm/src/worksheet_read.rs
++++ b/bindings/wasm/src/worksheet_read.rs
+@@ -132,6 +132,27 @@ impl Worksheet {
+         Ok(ws.formatted_value_at(row, col as u16))
+     }
+ 
++    /// Stored cell coordinates as sorted, deduplicated (row, column) pairs.
++    /// Includes styled blanks and formula-only cells without expanding merged ranges.
++    #[wasm_bindgen(js_name = storedCellCoordinates)]
++    pub fn stored_cell_coordinates(&self) -> Result<Vec<u32>, JsError> {
++        let wb = self.workbook.borrow();
++        let ws = wb
++            .worksheet(self.sheet_index)
++            .ok_or_else(|| JsError::new("Worksheet no longer exists"))?;
++        let mut coordinates: Vec<(u32, u16)> = ws
++            .cells_map_in_range(0, u32::MAX)
++            .map(|(&(row, col), _)| (row, col))
++            .chain(ws.formula_cells().map(|(row, col, _)| (row, col)))
++            .collect();
++        coordinates.sort_unstable();
++        coordinates.dedup();
++        Ok(coordinates
++            .into_iter()
++            .flat_map(|(row, col)| [row, u32::from(col)])
++            .collect())
++    }
++
+     #[wasm_bindgen(skip_typescript, js_name = getRowsBatch)]
+     pub fn get_rows_batch(
+         &self,
+diff --git a/bindings/wasm/tests/wasm.rs b/bindings/wasm/tests/wasm.rs
+index 28ea3c5..250ddc0 100644
+--- a/bindings/wasm/tests/wasm.rs
++++ b/bindings/wasm/tests/wasm.rs
+@@ -2046,3 +2046,27 @@ fn test_chart_style_js_surface() {
+         "colorStyle.method missing"
+     );
+ }
++
++#[wasm_bindgen_test]
++fn test_stored_coordinates_include_styled_blanks_and_formula_only_cells() {
++    let wb = Workbook::new();
++    let sheet = wb.get_sheet(0).unwrap();
++    sheet.set_cell("C3", JsValue::from_f64(7.0)).unwrap();
++    sheet.set_formula("B2", "=\"\"").unwrap();
++    let style = Object::new();
++    let font = Object::new();
++    Reflect::set(&font, &JsValue::from_str("bold"), &JsValue::TRUE).unwrap();
++    Reflect::set(&style, &JsValue::from_str("font"), &font).unwrap();
++    sheet.set_cell_style("XFD1048576", style.into()).unwrap();
++    sheet.merge_cells("F10:J1000").unwrap();
++    assert_eq!(
++        sheet.stored_cell_coordinates().unwrap(),
++        vec![1, 1, 2, 2, 1_048_575, 16_383]
++    );
++    sheet.set_cell("C3", JsValue::NULL).unwrap();
++    sheet.set_formula("A1", "=1/0").unwrap();
++    assert_eq!(
++        sheet.stored_cell_coordinates().unwrap(),
++        vec![0, 0, 1, 1, 1_048_575, 16_383]
++    );
++}
+diff --git a/crates/duke-sheets-core/src/cell/view.rs b/crates/duke-sheets-core/src/cell/view.rs
+index f6f8d09..4627c96 100644
+--- a/crates/duke-sheets-core/src/cell/view.rs
++++ b/crates/duke-sheets-core/src/cell/view.rs
+@@ -653,6 +653,16 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn builtin_accounting_decimal() {
++        let result = fmt(
++            &CellValue::Number(29081.0),
++            &NumberFormat::BuiltIn(43),
++            false,
++        );
++        assert_eq!(result, " 29,081.00 ");
++    }
++
+     // Edge cases
+ 
+     #[test]
+@@ -696,6 +706,9 @@ mod tests {
+         let val = CellValue::Number(46022.0);
+         let fmt_code = NumberFormat::Custom("m/d/yyyy_)".to_string());
+         let result = fmt(&val, &fmt_code, false);
+-        assert_eq!(result, "12/31/2025 ", "underscore-paren should produce a space, not a literal ')'");
++        assert_eq!(
++            result, "12/31/2025 ",
++            "underscore-paren should produce a space, not a literal ')'"
++        );
+     }
+ }
+diff --git a/crates/duke-sheets-core/src/style/number_format.rs b/crates/duke-sheets-core/src/style/number_format.rs
+index df7e64a..135ab58 100644
+--- a/crates/duke-sheets-core/src/style/number_format.rs
++++ b/crates/duke-sheets-core/src/style/number_format.rs
+@@ -65,6 +65,10 @@ impl NumberFormat {
+     pub const ID_ACCOUNTING_DEC2: u32 = 39;
+     /// 40 - #,##0.00;[Red](#,##0.00)
+     pub const ID_ACCOUNTING_DEC2_RED: u32 = 40;
++    pub const ID_ACCOUNTING_PADDED_INT: u32 = 41;
++    pub const ID_ACCOUNTING_DOLLAR_INT: u32 = 42;
++    pub const ID_ACCOUNTING_PADDED_DEC2: u32 = 43;
++    pub const ID_ACCOUNTING_DOLLAR_DEC2: u32 = 44;
+     /// 49 - @
+     pub const ID_TEXT: u32 = 49;
+ 
+@@ -175,6 +179,10 @@ impl NumberFormat {
+             38 => "#,##0_);[Red](#,##0)",
+             39 => "#,##0.00_);(#,##0.00)",
+             40 => "#,##0.00_);[Red](#,##0.00)",
++            41 => "_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)",
++            42 => "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)",
++            43 => "_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)",
++            44 => "_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)",
+             45 => "mm:ss",
+             46 => "[h]:mm:ss",
+             47 => "mm:ss.0",
+diff --git a/crates/duke-sheets-core/src/worksheet.rs b/crates/duke-sheets-core/src/worksheet.rs
+index aca776d..797db25 100644
+--- a/crates/duke-sheets-core/src/worksheet.rs
++++ b/crates/duke-sheets-core/src/worksheet.rs
+@@ -737,6 +737,19 @@ impl Worksheet {
+         Ok(())
+     }
+ 
++    /// Remove a cell's explicit style without changing its value or formula.
++    pub fn clear_cell_style_at(&mut self, row: u32, col: u16) -> Result<()> {
++        self.validate_cell_position(row, col)?;
++        self.cells.set_style(row, col, 0);
++        // Only a truly absent value can be pruned; empty literal strings and formula caches stay.
++        if self.cells.get(row, col).is_some_and(|cell| matches!(cell.value, CellValue::Empty))
++            && self.cells.get_formula(row, col).is_none()
++        {
++            self.cells.remove(row, col);
++        }
++        Ok(())
++    }
++
+     /// Clear a cell
+     pub fn clear_cell(&mut self, address: &str) -> Result<()> {
+         let addr = CellAddress::parse(address)?;
+@@ -3009,6 +3022,40 @@ mod tests {
+         assert_eq!(range.end.col, 7);
+     }
+ 
++    #[test]
++    fn test_clear_cell_style_preserves_value_and_formula() {
++        let mut ws = Worksheet::new("Test");
++        ws.set_cell_value_at(0, 0, "001").unwrap();
++        ws.set_formula_with_cached_value_at(1, 0, "=1+1", CellValue::Number(2.0))
++            .unwrap();
++        for row in [0, 1] {
++            ws.set_cell_style_at(row, 0, &Style::new().bold(true))
++                .unwrap();
++            ws.clear_cell_style_at(row, 0).unwrap();
++            assert!(ws.cell_style_at(row, 0).is_none());
++        }
++        assert_eq!(ws.get_value_at(0, 0), CellValue::string("001"));
++        assert_eq!(ws.get_value_at(1, 0), CellValue::Number(2.0));
++        assert_eq!(ws.get_formula_at(1, 0), Some("=1+1"));
++        assert!(ws.clear_cell_style_at(1_048_576, 0).is_err());
++        assert!(ws.clear_cell_style_at(0, 16_384).is_err());
++        let count = ws.cell_count();
++        ws.clear_cell_style_at(10, 10).unwrap();
++        assert_eq!(ws.cell_count(), count);
++        ws.set_cell_style_at(10, 10, &Style::new().bold(true)).unwrap();
++        ws.clear_cell_style_at(10, 10).unwrap();
++        assert_eq!(ws.cell_count(), count);
++        ws.set_cell_value_at(2, 0, "").unwrap();
++        ws.set_cell_style_at(2, 0, &Style::new().bold(true)).unwrap();
++        ws.clear_cell_style_at(2, 0).unwrap();
++        assert!(matches!(ws.get_value_at_ref(2, 0), CellValue::String(_)));
++        ws.set_formula_with_cached_value_at(3, 0, "=IF(TRUE,\"\",0)", CellValue::Empty).unwrap();
++        ws.set_cell_style_at(3, 0, &Style::new().bold(true)).unwrap();
++        ws.clear_cell_style_at(3, 0).unwrap();
++        assert_eq!(ws.get_formula_at(3, 0), Some("=IF(TRUE,\"\",0)"));
++        assert_eq!(ws.cell_count(), count + 2);
++    }
++
+     #[test]
+     fn test_populated_cells_in_range_skips_style_only_cells() {
+         let mut ws = Worksheet::new("Test");
+diff --git a/crates/duke-sheets-formula/src/eval_cache.rs b/crates/duke-sheets-formula/src/eval_cache.rs
+index a40463e..be5f6a8 100644
+--- a/crates/duke-sheets-formula/src/eval_cache.rs
++++ b/crates/duke-sheets-formula/src/eval_cache.rs
+@@ -5,6 +5,7 @@
+ //! - **Tier 2**: Lookup hash index - O(1) exact-match lookups for MATCH/VLOOKUP/XLOOKUP
+ //! - **Tier 3**: Sheet name → index cache - avoids linear scan for cross-sheet references
+ 
++use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::Arc;
+ 
+ use ahash::AHashMap;
+@@ -16,6 +17,9 @@ use duke_sheets_core::{CellError, CellValue};
+ /// Key for a materialized range: (sheet_idx, start_row, start_col, end_row, end_col).
+ pub type RangeKey = (usize, u32, u16, u32, u16);
+ 
++// Bound retained range payloads per calculation pass, independent of formula count.
++const RANGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
++
+ /// Key for a lookup index: range key + column offset within that range.
+ pub type LookupIndexKey = (RangeKey, u16);
+ 
+@@ -40,13 +44,14 @@ pub enum LookupSourceKey {
+ /// Created once at the start of `execute_eval_plan()`, passed by reference
+ /// into every `EvaluationContext`. Dropped when the eval pass completes.
+ ///
+-/// All fields use `DashMap` for lock-free concurrent access from the
+-/// parallel (rayon) evaluation path.
++/// Shared maps use `DashMap` for concurrent access from the parallel
++/// (rayon) evaluation path.
+ pub struct EvalCache {
+     /// Tier 1: Materialized range values.
+-    /// First call to `get_range_values()` for a given range key materializes
+-    /// and stores the data; subsequent calls return an `Arc` clone.
++    /// A materialized range is retained only within the per-pass payload budget;
++    /// subsequent calls return an `Arc` clone when the range was retained.
+     pub ranges: DashMap<RangeKey, Arc<Vec<Vec<FormulaValue>>>>,
++    range_cache_bytes: AtomicUsize,
+ 
+     /// Tier 2: Hash index on a 1D lookup column for exact-match lookups.
+     /// Key is (range_key, column_offset). Built lazily on first exact-match
+@@ -67,11 +72,66 @@ impl EvalCache {
+     pub fn new(sheet_names: AHashMap<String, usize>) -> Self {
+         Self {
+             ranges: DashMap::new(),
++            range_cache_bytes: AtomicUsize::new(0),
+             lookup_indexes: DashMap::new(),
+             source_lookup_indexes: DashMap::new(),
+             sheet_names,
+         }
+     }
++
++    /// Cache a materialized range only while its retained payload fits the pass budget.
++    /// Accounting includes row/value buffers and string capacities, not allocator metadata.
++    pub fn cache_range(&self, key: RangeKey, values: Arc<Vec<Vec<FormulaValue>>>) {
++        use dashmap::mapref::entry::Entry;
++
++        let Some(bytes) = range_payload_bytes(&values) else {
++            return;
++        };
++        if let Entry::Vacant(entry) = self.ranges.entry(key) {
++            let mut used = self.range_cache_bytes.load(Ordering::Relaxed);
++            loop {
++                let Some(total) = used
++                    .checked_add(bytes)
++                    .filter(|&total| total <= RANGE_CACHE_BYTES)
++                else {
++                    return;
++                };
++                match self.range_cache_bytes.compare_exchange_weak(
++                    used,
++                    total,
++                    Ordering::Relaxed,
++                    Ordering::Relaxed,
++                ) {
++                    Ok(_) => {
++                        entry.insert(values);
++                        return;
++                    }
++                    Err(current) => used = current,
++                }
++            }
++        }
++    }
++}
++
++fn range_payload_bytes(rows: &Vec<Vec<FormulaValue>>) -> Option<usize> {
++    let mut bytes = std::mem::size_of_val(rows).checked_add(
++        rows.capacity()
++            .checked_mul(std::mem::size_of::<Vec<FormulaValue>>())?,
++    )?;
++    for row in rows {
++        bytes = bytes.checked_add(
++            row.capacity()
++                .checked_mul(std::mem::size_of::<FormulaValue>())?,
++        )?;
++        for value in row {
++            match value {
++                FormulaValue::String(text) => bytes = bytes.checked_add(text.capacity())?,
++                FormulaValue::Array { .. } => return None,
++                _ => {}
++            }
++        }
++    }
++    Some(bytes)
+ }
+ 
+ /// Hash index on a 1D vector of FormulaValues for O(1) exact-match lookup.
+diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
+index 515b5a7..a9c3fb9 100644
+--- a/crates/duke-sheets-formula/src/evaluator.rs
++++ b/crates/duke-sheets-formula/src/evaluator.rs
+@@ -281,8 +281,8 @@ impl<'a> EvaluationContext<'a> {
+ 
+     /// Get a range of cell values as an array.
+     ///
+-    /// When an `eval_cache` is present (Tier 1), the materialized range is cached.
+-    /// Subsequent calls with the same range key return a clone from the cache.
++    /// When the pass cache has room (Tier 1), retain the materialized range.
++    /// Subsequent calls with the same range key can reuse that cached allocation.
+     pub fn get_range_arc(
+         &self,
+         sheet: Option<&str>,
+@@ -317,8 +317,20 @@ impl<'a> EvaluationContext<'a> {
+             None => return Err(FormulaValue::Error(CellError::Ref)),
+         };
+ 
+-        let num_rows = (end_row - start_row + 1) as usize;
+-        let num_cols = (end_col - start_col + 1) as usize;
++        let num_rows = end_row
++            .checked_sub(start_row)
++            .and_then(|n| n.checked_add(1))
++            .and_then(|n| usize::try_from(n).ok())
++            .ok_or(FormulaValue::Error(CellError::Ref))?;
++        let num_cols = end_col
++            .checked_sub(start_col)
++            .and_then(|n| n.checked_add(1))
++            .map(usize::from)
++            .ok_or(FormulaValue::Error(CellError::Ref))?;
++        num_rows
++            .checked_mul(num_cols)
++            .and_then(|n| n.checked_mul(std::mem::size_of::<FormulaValue>()))
++            .ok_or(FormulaValue::Error(CellError::Ref))?;
+         let mut rows = Vec::with_capacity(num_rows);
+         for row in start_row..=end_row {
+             let mut cols = Vec::with_capacity(num_cols);
+@@ -330,7 +342,7 @@ impl<'a> EvaluationContext<'a> {
+ 
+         let rows = Arc::new(rows);
+         if let Some(cache) = self.eval_cache {
+-            cache.ranges.insert(range_key, rows.clone());
++            cache.cache_range(range_key, rows.clone());
+         }
+         Ok((rows, source))
+     }
+@@ -878,6 +890,20 @@ fn to_array(val: &FormulaValue) -> Vec<Vec<FormulaValue>> {
+     }
+ }
+ 
++fn correct_cancellation(result: f64, left: f64, right: f64) -> f64 {
++    let operand_scale = left.abs().max(right.abs());
++    if result != 0.0
++        && result.is_finite()
++        && operand_scale.is_finite()
++        && (left.fract() != 0.0 || right.fract() != 0.0)
++        && result.abs() <= operand_scale * f64::EPSILON
++    {
++        0.0
++    } else {
++        result
++    }
++}
++
+ fn apply_scalar_binary_op(
+     op: BinaryOperator,
+     left_val: &FormulaValue,
+@@ -900,7 +926,7 @@ fn apply_scalar_binary_op(
+             let r = right_val
+                 .as_number()
+                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
+-            Ok(FormulaValue::Number(l + r))
++            Ok(FormulaValue::Number(correct_cancellation(l + r, l, r)))
+         }
+         BinaryOperator::Subtract => {
+             let l = left_val
+@@ -909,7 +935,7 @@ fn apply_scalar_binary_op(
+             let r = right_val
+                 .as_number()
+                 .ok_or_else(|| FormulaError::Evaluation("Expected number".into()))?;
+-            Ok(FormulaValue::Number(l - r))
++            Ok(FormulaValue::Number(correct_cancellation(l - r, l, r)))
+         }
+         BinaryOperator::Multiply => {
+             let l = left_val
+@@ -2136,9 +2162,8 @@ fn evaluate_external_function(
+     }
+ 
+     match ctx.external_fn {
+-        Some(handler) => handler(book, name, &arg_strings).ok_or_else(|| {
+-            FormulaError::ExternalFunctionUnresolved(format!("[{book}]!{name}"))
+-        }),
++        Some(handler) => handler(book, name, &arg_strings)
++            .ok_or_else(|| FormulaError::ExternalFunctionUnresolved(format!("[{book}]!{name}"))),
+         None => Err(FormulaError::ExternalFunctionUnresolved(format!(
+             "[{book}]!{name}"
+         ))),
+@@ -2206,6 +2231,32 @@ fn evaluate_function(
+         }
+     }
+ 
++    // A single SUM range needs no array or per-range retained copy.
++    if lookup_name == "SUM" {
++        if let [FormulaExpr::RangeRef(range)] = args {
++            if let Some(workbook) = ctx.workbook {
++                let sheet = match ctx.resolve_sheet_index(range.sheet.as_deref(), workbook) {
++                    Ok(index) => match workbook.worksheet(index) {
++                        Some(sheet) => sheet,
++                        None => return Ok(FormulaValue::Error(CellError::Ref)),
++                    },
++                    Err(error) => return Ok(error),
++                };
++                let mut sum = 0.0;
++                for row in range.range.start.row..=range.range.end.row {
++                    for col in range.range.start.col..=range.range.end.col {
++                        match sheet.get_value_at_ref(row, col) {
++                            CellValue::Number(value) => sum += value,
++                            CellValue::Error(error) => return Ok(FormulaValue::Error(*error)),
++                            _ => {}
++                        }
++                    }
++                }
++                return Ok(FormulaValue::Number(sum));
++            }
++        }
++    }
++
+     // Special case: AREAS needs the raw AST to count union branches.
+     if lookup_name == "AREAS" {
+         return evaluate_areas(args, ctx);
+@@ -2619,6 +2670,84 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn materialized_prefix_ranges_stop_filling_the_cache_without_changing_values() {
++        let mut workbook = Workbook::new();
++        for row in 0..1_000 {
++            workbook
++                .worksheet_mut(0)
++                .unwrap()
++                .set_cell_value_at(row, 0, "a".repeat(64))
++                .unwrap();
++        }
++        let cache = crate::EvalCache::new(Default::default());
++        let mut ctx = EvaluationContext::new(Some(&workbook), 0, 0, 0);
++        ctx.eval_cache = Some(&cache);
++        for end_row in 0..1_000 {
++            let FormulaValue::Array { data, .. } = ctx.get_range_values(None, 0, 0, end_row, 0)
++            else {
++                panic!("range did not produce its values");
++            };
++            assert_eq!(data.len(), end_row as usize + 1);
++            assert_eq!(
++                data.last().unwrap()[0],
++                FormulaValue::String("a".repeat(64))
++            );
++        }
++        assert!(!cache.ranges.is_empty());
++        assert!(
++            cache.ranges.len() < 1_000,
++            "distinct ranges must not grow without a budget"
++        );
++        assert!(matches!(
++            ctx.get_range_arc(None, 0, 0, u32::MAX, 0),
++            Err(FormulaValue::Error(CellError::Ref))
++        ));
++    }
++
++    #[test]
++    fn streaming_sum_preserves_range_order_types_errors_and_sheet_resolution() {
++        let mut workbook = Workbook::new();
++        workbook.add_worksheet_with_name("Other").unwrap();
++        for sheet_index in 0..2 {
++            let sheet = workbook.worksheet_mut(sheet_index).unwrap();
++            sheet.set_cell_value("A1", 1e16).unwrap();
++            sheet.set_cell_value("B1", 1.0).unwrap();
++            sheet.set_cell_value("A2", -1e16).unwrap();
++            sheet.set_cell_value("B2", 3.0).unwrap();
++            sheet.set_cell_value("A3", "12").unwrap();
++            sheet.set_cell_value("B3", true).unwrap();
++        }
++        for error in [false, true] {
++            if error {
++                let sheet = workbook.worksheet_mut(1).unwrap();
++                sheet
++                    .set_cell_value("B2", CellValue::Error(CellError::Div0))
++                    .unwrap();
++                sheet
++                    .set_cell_value("A3", CellValue::Error(CellError::Na))
++                    .unwrap();
++            }
++            let ctx = EvaluationContext::new(Some(&workbook), 0, 0, 0);
++            for sheet_name in [None, Some("Other"), Some("Missing")] {
++                let formula = format!(
++                    "=SUM({}A1:B4)",
++                    sheet_name.map(|s| format!("{s}!")).unwrap_or_default()
++                );
++                let expression = crate::parser::parse_formula(&formula).unwrap();
++                let generic = crate::functions::math::fn_sum(
++                    &[ctx.get_range_values(sheet_name, 0, 0, 3, 1)],
++                    &ctx,
++                )
++                .unwrap();
++                assert_eq!(evaluate(&expression, &ctx).unwrap(), generic, "{formula}");
++                if sheet_name.is_none() {
++                    assert_eq!(generic, FormulaValue::Number(3.0));
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn test_evaluate_comparison() {
+         assert_eq!(eval("=1<2").unwrap(), FormulaValue::Boolean(true));
+diff --git a/crates/duke-sheets/examples/profile_calc.rs b/crates/duke-sheets/examples/profile_calc.rs
+index d2d0950..02b68e0 100644
+--- a/crates/duke-sheets/examples/profile_calc.rs
++++ b/crates/duke-sheets/examples/profile_calc.rs
+@@ -182,7 +182,7 @@ impl<'a> ParallelAnalyzer<'a> {
+             FormulaExpr::UnaryOp { operand, .. } => {
+                 self.extract_refs_from_expr(operand, current_sheet, refs);
+             }
+-            FormulaExpr::Function { args, .. } => {
++            FormulaExpr::Function { args, .. } | FormulaExpr::ExternalFunction { args, .. } => {
+                 for arg in args {
+                     self.extract_refs_from_expr(arg, current_sheet, refs);
+                 }
+diff --git a/crates/duke-sheets/src/calculation.rs b/crates/duke-sheets/src/calculation.rs
+index 853a71c..d0160dc 100644
+--- a/crates/duke-sheets/src/calculation.rs
++++ b/crates/duke-sheets/src/calculation.rs
+@@ -744,14 +744,11 @@ impl CalculationEngine {
+             stats.volatile_cells = self.volatile_cells.len();
+             plan = cache.plan;
+             if !dirty_ranges.is_empty() {
+-                affected_flags = Some(collect_affected_formula_flags(&plan, &dirty_ranges));
+-                if let Some(flags) = affected_flags.as_mut() {
+-                    for &cell in &self.volatile_cells {
+-                        if let Some(&idx) = plan.cell_to_idx.get(&cell) {
+-                            flags[idx as usize] = true;
+-                        }
+-                    }
+-                }
++                affected_flags = Some(collect_affected_formula_flags(
++                    &plan,
++                    &dirty_ranges,
++                    &self.volatile_cells,
++                ));
+             }
+         } else {
+             // Cache miss - full parse + DFS.
+@@ -2243,7 +2240,11 @@ fn collect_dirty_value_ranges(workbook: &Workbook) -> Vec<SensitiveRange> {
+     dirty
+ }
+ 
+-fn collect_affected_formula_flags(plan: &EvalPlan, dirty_ranges: &[SensitiveRange]) -> Vec<bool> {
++fn collect_affected_formula_flags(
++    plan: &EvalPlan,
++    dirty_ranges: &[SensitiveRange],
++    volatile_cells: &AHashSet<CellKey>,
++) -> Vec<bool> {
+     let mut affected = vec![false; plan.idx_to_cell.len()];
+     let mut stack = Vec::new();
+ 
+@@ -2263,6 +2264,17 @@ fn collect_affected_formula_flags(plan: &EvalPlan, dirty_ranges: &[SensitiveRang
+         }
+     }
+ 
++    // Volatile/add-in values can change without an ordinary input edit.
++    // Seed them before propagation so their entire dependent closure updates too.
++    for cell in volatile_cells {
++        if let Some(&idx) = plan.cell_to_idx.get(cell) {
++            if !affected[idx as usize] {
++                affected[idx as usize] = true;
++                stack.push(idx);
++            }
++        }
++    }
++
+     while let Some(idx) = stack.pop() {
+         for &dep in plan.dependents[idx as usize].iter() {
+             if !affected[dep as usize] {
+@@ -2838,7 +2850,10 @@ mod tests {
+             external_fn: Some(Arc::new(|book, name, args| {
+                 assert_eq!(book, "1");
+                 assert_eq!(name, "TBLink");
+-                assert_eq!(args, &["acct".to_string(), "7".to_string(), "3".to_string()]);
++                assert_eq!(
++                    args,
++                    &["acct".to_string(), "7".to_string(), "3".to_string()]
++                );
+                 Some(FormulaValue::Number(99.0))
+             })),
+             ..Default::default()
+@@ -2858,8 +2873,12 @@ mod tests {
+     fn test_unresolved_external_function_preserves_cached_value() {
+         let mut workbook = Workbook::new();
+         let sheet = workbook.worksheet_mut(0).unwrap();
+-        sheet.set_cell_formula("A1", r#"=[1]!TBLink("acct")"#).unwrap();
+-        sheet.set_formula_result(0, 0, CellValue::Number(42.0)).unwrap();
++        sheet
++            .set_cell_formula("A1", r#"=[1]!TBLink("acct")"#)
++            .unwrap();
++        sheet
++            .set_formula_result(0, 0, CellValue::Number(42.0))
++            .unwrap();
+ 
+         let stats = workbook.calculate().unwrap();
+         assert_eq!(stats.errors, 0);
+@@ -4106,6 +4125,91 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn incremental_external_revisions_update_transitive_dependents_with_other_dirty_inputs() {
++        use std::sync::atomic::{AtomicUsize, Ordering};
++
++        let mut workbook = Workbook::new();
++        let other = workbook.add_worksheet_with_name("Other").unwrap();
++        let source = Arc::new(AtomicUsize::new(10));
++        let value = source.clone();
++        let options = CalculationOptions {
++            force_full_calculation: false,
++            external_fn: Some(Arc::new(move |_, _, _| {
++                Some(FormulaValue::Number(value.load(Ordering::Relaxed) as f64))
++            })),
++            ..Default::default()
++        };
++        let sheet = workbook.worksheet_mut(0).unwrap();
++        sheet.set_cell_value("A1", 1.0).unwrap();
++        sheet
++            .set_cell_formula("B1", r#"=[1]!TBLink("acct")"#)
++            .unwrap();
++        sheet.set_cell_formula("C1", "=B1*2").unwrap();
++        sheet.set_cell_formula("D1", "=A1*3").unwrap();
++        workbook
++            .worksheet_mut(other)
++            .unwrap()
++            .set_cell_formula("A1", "=Sheet1!C1+1")
++            .unwrap();
++        workbook.calculate_with_options(&options).unwrap();
++
++        for (external, dirty) in [(20, Some(2.0)), (30, None)] {
++            source.store(external, Ordering::Relaxed);
++            if let Some(dirty) = dirty {
++                workbook
++                    .worksheet_mut(0)
++                    .unwrap()
++                    .set_cell_value("A1", dirty)
++                    .unwrap();
++            }
++            workbook.calculate_with_options(&options).unwrap();
++            assert_eq!(
++                workbook.worksheet(0).unwrap().get_calculated_value_at(0, 2),
++                Some(&CellValue::Number((external * 2) as f64))
++            );
++            assert_eq!(
++                workbook
++                    .worksheet(other)
++                    .unwrap()
++                    .get_calculated_value_at(0, 0),
++                Some(&CellValue::Number((external * 2 + 1) as f64))
++            );
++            assert_eq!(
++                workbook.worksheet(0).unwrap().get_calculated_value_at(0, 3),
++                Some(&CellValue::Number(6.0))
++            );
++        }
++    }
++
++    #[test]
++    fn fifteen_thousand_prefix_sums_calculate_without_materializing_prefix_arrays() {
++        let mut workbook = Workbook::new();
++        let sheet = workbook.worksheet_mut(0).unwrap();
++        for row in 0..15_000 {
++            sheet.set_cell_value_at(row, 0, (row + 1) as f64).unwrap();
++            sheet
++                .set_cell_formula_at(row, 1, &format!("=SUM(A1:A{})", row + 1))
++                .unwrap();
++        }
++        let stats = workbook
++            .calculate_with_options(&CalculationOptions {
++                max_threads: Some(1),
++                ..Default::default()
++            })
++            .unwrap();
++        assert_eq!(stats.cells_calculated, 15_000);
++        assert_eq!(stats.errors, 0);
++        let sheet = workbook.worksheet(0).unwrap();
++        for row in 0..15_000 {
++            let n = (row + 1) as u64;
++            assert_eq!(
++                sheet.get_calculated_value_at(row, 1),
++                Some(&CellValue::Number((n * (n + 1) / 2) as f64))
++            );
++        }
++    }
++
+     fn assert_cached_vs_full_equivalence(wb_cached: &Workbook, wb_full: &Workbook) {
+         assert_eq!(wb_cached.sheet_count(), wb_full.sheet_count());
+         for i in 0..wb_cached.sheet_count() {
+diff --git a/crates/duke-sheets/tests/formula_evaluation.rs b/crates/duke-sheets/tests/formula_evaluation.rs
+index 518180e..d7ce969 100644
+--- a/crates/duke-sheets/tests/formula_evaluation.rs
++++ b/crates/duke-sheets/tests/formula_evaluation.rs
+@@ -79,6 +79,95 @@ fn test_evaluate_with_cell_references() {
+     assert_eq!(result, FormulaValue::Boolean(true));
+ }
+ 
++#[test]
++fn test_excel_precision_cancels_bank_reconciliation_differences() {
++    let mut wb = Workbook::new();
++    {
++        let sheet = wb.worksheet_mut(0).unwrap();
++        let cases = [
++            (2_231_846.68, -1_084_381.76, 1_147_464.92),
++            (1_627_144.62, -19_623.98, 1_607_520.64),
++            (974_088.06, -55_324.24, 918_763.82),
++            (1_259_114.13, -235_621.58, 1_023_492.55),
++            (776_834.28, -35_579.47, 741_254.81),
++        ];
++
++        for (index, (bank_balance, outstanding_checks, book_balance)) in
++            cases.into_iter().enumerate()
++        {
++            let row = index + 1;
++            sheet
++                .set_cell_value(&format!("A{row}"), bank_balance)
++                .unwrap();
++            sheet
++                .set_cell_value(&format!("B{row}"), outstanding_checks)
++                .unwrap();
++            sheet
++                .set_cell_value(&format!("C{row}"), book_balance)
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("D{row}"), &format!("=A{row}+B{row}"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("E{row}"), &format!("=D{row}-C{row}"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("F{row}"), &format!("=E{row}=0"))
++                .unwrap();
++            sheet
++                .set_cell_formula(&format!("G{row}"), &format!("=E{row}+100"))
++                .unwrap();
++        }
++    }
++
++    wb.calculate().unwrap();
++
++    let sheet = wb.worksheet(0).unwrap();
++    for row in 0..5 {
++        assert_eq!(sheet.get_value_at(row, 4), CellValue::Number(0.0));
++        assert_eq!(sheet.get_value_at(row, 5), CellValue::Boolean(true));
++        assert_eq!(sheet.get_value_at(row, 6), CellValue::Number(100.0));
++    }
++}
++
++#[test]
++fn test_excel_precision_preserves_non_cancelling_differences() {
++    let ctx = EvaluationContext::simple();
++
++    let visible_precision = evaluate(&parse_formula("=(43.1-43.2)+1").unwrap(), &ctx).unwrap();
++    let meaningful_difference = evaluate(&parse_formula("=1.000000001-1").unwrap(), &ctx).unwrap();
++    let tiny_sum = evaluate(&parse_formula("=1E-20+1E-20").unwrap(), &ctx).unwrap();
++    let corrected_cancellation =
++        evaluate(&parse_formula("=1.333+1.225-1.333-1.225").unwrap(), &ctx).unwrap();
++    let exact_integer_difference = evaluate(
++        &parse_formula("=4503599627370497-4503599627370496").unwrap(),
++        &ctx,
++    )
++    .unwrap();
++    let exact_integer_sum = evaluate(
++        &parse_formula("=4503599627370497+-4503599627370496").unwrap(),
++        &ctx,
++    )
++    .unwrap();
++
++    let FormulaValue::Number(visible_precision) = visible_precision else {
++        panic!("expected numeric result");
++    };
++    let FormulaValue::Number(meaningful_difference) = meaningful_difference else {
++        panic!("expected numeric result");
++    };
++    let FormulaValue::Number(tiny_sum) = tiny_sum else {
++        panic!("expected numeric result");
++    };
++
++    assert_eq!(visible_precision, 0.8999999999999986);
++    assert_ne!(meaningful_difference, 0.0);
++    assert_eq!(tiny_sum, 2e-20);
++    assert_eq!(corrected_cancellation, FormulaValue::Number(0.0));
++    assert_eq!(exact_integer_difference, FormulaValue::Number(1.0));
++    assert_eq!(exact_integer_sum, FormulaValue::Number(1.0));
++}
++
+ /// Test formula evaluation with range references
+ #[test]
+ fn test_evaluate_with_range_references() {
+@@ -233,7 +322,10 @@ fn test_workbook_calculate_power_zero_zero() {
+     ctx.eval_cache = Some(&cache);
+     let ast = parse_formula(wb.worksheet(0).unwrap().get_formula_at(0, 0).unwrap()).unwrap();
+     // Excel returns #NUM! for POWER(0,0)
+-    assert_eq!(evaluate(&ast, &ctx).unwrap(), FormulaValue::Error(CellError::Num));
++    assert_eq!(
++        evaluate(&ast, &ctx).unwrap(),
++        FormulaValue::Error(CellError::Num)
++    );
+ 
+     wb.calculate().unwrap();
+ 
+@@ -308,9 +400,9 @@ fn test_loaded_parity_cells_recalculate() {
+     wb.calculate().unwrap();
+ 
+     let tests_sheet = wb.worksheet(tests_sheet_idx).unwrap();
++    assert_eq!(tests_sheet.get_value_at(441, 2), CellValue::Number(1.0));
+     assert_eq!(
+-        tests_sheet.get_value_at(441, 2),
+-        CellValue::Number(1.0)
++        tests_sheet.get_value_at(456, 2),
++        CellValue::Error(CellError::Num)
+     );
+-    assert_eq!(tests_sheet.get_value_at(456, 2), CellValue::Error(CellError::Num));
+ }
+diff --git a/crates/ssfmt/src/builtin_formats.rs b/crates/ssfmt/src/builtin_formats.rs
+index 263f22f..63f5b0c 100644
+--- a/crates/ssfmt/src/builtin_formats.rs
++++ b/crates/ssfmt/src/builtin_formats.rs
+@@ -53,13 +53,15 @@ pub fn format_code_from_id(id: u32) -> Option<&'static str> {
+         38 => Some("#,##0 ;[Red](#,##0)"),
+         39 => Some("#,##0.00;(#,##0.00)"),
+         40 => Some("#,##0.00;[Red](#,##0.00)"),
++        41 => Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)"),
++        42 => Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)"),
++        43 => Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)"),
++        44 => Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)"),
+         45 => Some("mm:ss"),
+         46 => Some("[h]:mm:ss"),
+         47 => Some("mmss.0"),
+         48 => Some("##0.0E+0"),
+         49 => Some("@"),
+-        // Note: IDs 5-8, 23-36, 41-44, 50+ are not defined as built-in formats
+-        // Custom formats typically start at 164
+         _ => None,
+     }
+ }
+@@ -132,6 +134,22 @@ mod tests {
+         assert_eq!(format_code_from_id(38), Some("#,##0 ;[Red](#,##0)"));
+         assert_eq!(format_code_from_id(39), Some("#,##0.00;(#,##0.00)"));
+         assert_eq!(format_code_from_id(40), Some("#,##0.00;[Red](#,##0.00)"));
++        assert_eq!(
++            format_code_from_id(41),
++            Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(42),
++            Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(43),
++            Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
++        );
++        assert_eq!(
++            format_code_from_id(44),
++            Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
++        );
+     }
+ 
+     #[test]
+diff --git a/crates/ssfmt/tests/builtin_format_id_tests.rs b/crates/ssfmt/tests/builtin_format_id_tests.rs
+index e753a04..4cf02c4 100644
+--- a/crates/ssfmt/tests/builtin_format_id_tests.rs
++++ b/crates/ssfmt/tests/builtin_format_id_tests.rs
+@@ -1,4 +1,4 @@
+-use ssfmt::{format_with_id_default, format_code_from_id};
++use ssfmt::{format_code_from_id, format_with_id_default};
+ 
+ /// Test built-in format ID 0 (General)
+ #[test]
+@@ -49,7 +49,10 @@ fn test_format_id_3_thousands() {
+ fn test_format_id_4_thousands_decimals() {
+     assert_eq!(format_with_id_default(0.0, 4).unwrap(), "0.00");
+     assert_eq!(format_with_id_default(1234.56, 4).unwrap(), "1,234.56");
+-    assert_eq!(format_with_id_default(1234567.89, 4).unwrap(), "1,234,567.89");
++    assert_eq!(
++        format_with_id_default(1234567.89, 4).unwrap(),
++        "1,234,567.89"
++    );
+     assert_eq!(format_with_id_default(-1000.5, 4).unwrap(), "-1,000.50");
+ }
+ 
+@@ -127,8 +130,8 @@ fn test_invalid_format_ids() {
+ #[test]
+ fn test_all_defined_format_ids() {
+     let defined_ids = vec![
+-        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+-        37, 38, 39, 40, 45, 46, 47, 48, 49,
++        0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 37, 38, 39, 40, 41,
++        42, 43, 44, 45, 46, 47, 48, 49,
+     ];
+ 
+     for id in defined_ids {
+@@ -137,7 +140,11 @@ fn test_all_defined_format_ids() {
+ 
+         // Verify we can parse and use the format code
+         let code_str = code.unwrap();
+-        assert!(!code_str.is_empty(), "Format code for ID {} should not be empty", id);
++        assert!(
++            !code_str.is_empty(),
++            "Format code for ID {} should not be empty",
++            id
++        );
+     }
+ }
+ 
+@@ -153,4 +160,21 @@ fn test_accounting_formats() {
+     // Negative with red color
+     let code = format_code_from_id(38).unwrap();
+     assert_eq!(code, "#,##0 ;[Red](#,##0)");
++
++    assert_eq!(
++        format_code_from_id(41),
++        Some("_(* #,##0_);_(* \\(#,##0\\);_(* \"-\"_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(42),
++        Some("_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(43),
++        Some("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)")
++    );
++    assert_eq!(
++        format_code_from_id(44),
++        Some("_(\"$\"* #,##0.00_);_(\"$\"* \\(#,##0.00\\);_(\"$\"* \"-\"??_);_(@_)")
++    );
+ }
