@@ -132,6 +132,27 @@ impl Worksheet {
         Ok(ws.formatted_value_at(row, col as u16))
     }
 
+    /// Stored cell coordinates as sorted, deduplicated (row, column) pairs.
+    /// Includes styled blanks and formula-only cells without expanding merged ranges.
+    #[wasm_bindgen(js_name = storedCellCoordinates)]
+    pub fn stored_cell_coordinates(&self) -> Result<Vec<u32>, JsError> {
+        let wb = self.workbook.borrow();
+        let ws = wb
+            .worksheet(self.sheet_index)
+            .ok_or_else(|| JsError::new("Worksheet no longer exists"))?;
+        let mut coordinates: Vec<(u32, u16)> = ws
+            .cells_map_in_range(0, u32::MAX)
+            .map(|(&(row, col), _)| (row, col))
+            .chain(ws.formula_cells().map(|(row, col, _)| (row, col)))
+            .collect();
+        coordinates.sort_unstable();
+        coordinates.dedup();
+        Ok(coordinates
+            .into_iter()
+            .flat_map(|(row, col)| [row, u32::from(col)])
+            .collect())
+    }
+
     #[wasm_bindgen(skip_typescript, js_name = getRowsBatch)]
     pub fn get_rows_batch(
         &self,

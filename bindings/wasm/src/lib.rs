@@ -989,6 +989,16 @@ impl Worksheet {
             .map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = clearCellStyleAt)]
+    pub fn clear_cell_style_at(&self, row: u32, col: u32) -> Result<(), JsError> {
+        let col = u16::try_from(col).map_err(|_| JsError::new("Column is outside the worksheet"))?;
+        let mut wb = self.workbook.borrow_mut();
+        let ws = wb
+            .worksheet_mut(self.sheet_index)
+            .ok_or_else(|| JsError::new("Worksheet no longer exists"))?;
+        ws.clear_cell_style_at(row, col).map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = setRangeStyle)]
     pub fn set_range_style(&self, range_str: &str, style: JsValue) -> Result<(), JsError> {
         let patch: WasmStylePatch = serde_wasm_bindgen::from_value(style).map_err(to_js_error)?;

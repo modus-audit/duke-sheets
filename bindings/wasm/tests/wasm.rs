@@ -2046,3 +2046,27 @@ fn test_chart_style_js_surface() {
         "colorStyle.method missing"
     );
 }
+
+#[wasm_bindgen_test]
+fn test_stored_coordinates_include_styled_blanks_and_formula_only_cells() {
+    let wb = Workbook::new();
+    let sheet = wb.get_sheet(0).unwrap();
+    sheet.set_cell("C3", JsValue::from_f64(7.0)).unwrap();
+    sheet.set_formula("B2", "=\"\"").unwrap();
+    let style = Object::new();
+    let font = Object::new();
+    Reflect::set(&font, &JsValue::from_str("bold"), &JsValue::TRUE).unwrap();
+    Reflect::set(&style, &JsValue::from_str("font"), &font).unwrap();
+    sheet.set_cell_style("XFD1048576", style.into()).unwrap();
+    sheet.merge_cells("F10:J1000").unwrap();
+    assert_eq!(
+        sheet.stored_cell_coordinates().unwrap(),
+        vec![1, 1, 2, 2, 1_048_575, 16_383]
+    );
+    sheet.set_cell("C3", JsValue::NULL).unwrap();
+    sheet.set_formula("A1", "=1/0").unwrap();
+    assert_eq!(
+        sheet.stored_cell_coordinates().unwrap(),
+        vec![0, 0, 1, 1, 1_048_575, 16_383]
+    );
+}

@@ -281,8 +281,8 @@ impl<'a> EvaluationContext<'a> {
 
     /// Get a range of cell values as an array.
     ///
-    /// When an `eval_cache` is present (Tier 1), the materialized range is cached.
-    /// Subsequent calls with the same range key return a clone from the cache.
+    /// When the pass cache has room (Tier 1), retain the materialized range.
+    /// Subsequent calls with the same range key can reuse that cached allocation.
     pub fn get_range_arc(
         &self,
         sheet: Option<&str>,
@@ -317,8 +317,20 @@ impl<'a> EvaluationContext<'a> {
             None => return Err(FormulaValue::Error(CellError::Ref)),
         };
 
-        let num_rows = (end_row - start_row + 1) as usize;
-        let num_cols = (end_col - start_col + 1) as usize;
+        let num_rows = end_row
+            .checked_sub(start_row)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(FormulaValue::Error(CellError::Ref))?;
+        let num_cols = end_col
+            .checked_sub(start_col)
+            .and_then(|n| n.checked_add(1))
+            .map(usize::from)
+            .ok_or(FormulaValue::Error(CellError::Ref))?;
+        num_rows
+            .checked_mul(num_cols)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<FormulaValue>()))
+            .ok_or(FormulaValue::Error(CellError::Ref))?;
         let mut rows = Vec::with_capacity(num_rows);
         for row in start_row..=end_row {
             let mut cols = Vec::with_capacity(num_cols);
@@ -330,7 +342,7 @@ impl<'a> EvaluationContext<'a> {
 
         let rows = Arc::new(rows);
         if let Some(cache) = self.eval_cache {
-            cache.ranges.insert(range_key, rows.clone());
+            cache.cache_range(range_key, rows.clone());
         }
         Ok((rows, source))
     }
@@ -2219,6 +2231,32 @@ fn evaluate_function(
         }
     }
 
+    // A single SUM range needs no array or per-range retained copy.
+    if lookup_name == "SUM" {
+        if let [FormulaExpr::RangeRef(range)] = args {
+            if let Some(workbook) = ctx.workbook {
+                let sheet = match ctx.resolve_sheet_index(range.sheet.as_deref(), workbook) {
+                    Ok(index) => match workbook.worksheet(index) {
+                        Some(sheet) => sheet,
+                        None => return Ok(FormulaValue::Error(CellError::Ref)),
+                    },
+                    Err(error) => return Ok(error),
+                };
+                let mut sum = 0.0;
+                for row in range.range.start.row..=range.range.end.row {
+                    for col in range.range.start.col..=range.range.end.col {
+                        match sheet.get_value_at_ref(row, col) {
+                            CellValue::Number(value) => sum += value,
+                            CellValue::Error(error) => return Ok(FormulaValue::Error(*error)),
+                            _ => {}
+                        }
+                    }
+                }
+                return Ok(FormulaValue::Number(sum));
+            }
+        }
+    }
+
     // Special case: AREAS needs the raw AST to count union branches.
     if lookup_name == "AREAS" {
         return evaluate_areas(args, ctx);
@@ -2630,6 +2668,84 @@ mod tests {
                 source: None,
             }
         );
+    }
+
+    #[test]
+    fn materialized_prefix_ranges_stop_filling_the_cache_without_changing_values() {
+        let mut workbook = Workbook::new();
+        for row in 0..1_000 {
+            workbook
+                .worksheet_mut(0)
+                .unwrap()
+                .set_cell_value_at(row, 0, "a".repeat(64))
+                .unwrap();
+        }
+        let cache = crate::EvalCache::new(Default::default());
+        let mut ctx = EvaluationContext::new(Some(&workbook), 0, 0, 0);
+        ctx.eval_cache = Some(&cache);
+        for end_row in 0..1_000 {
+            let FormulaValue::Array { data, .. } = ctx.get_range_values(None, 0, 0, end_row, 0)
+            else {
+                panic!("range did not produce its values");
+            };
+            assert_eq!(data.len(), end_row as usize + 1);
+            assert_eq!(
+                data.last().unwrap()[0],
+                FormulaValue::String("a".repeat(64))
+            );
+        }
+        assert!(!cache.ranges.is_empty());
+        assert!(
+            cache.ranges.len() < 1_000,
+            "distinct ranges must not grow without a budget"
+        );
+        assert!(matches!(
+            ctx.get_range_arc(None, 0, 0, u32::MAX, 0),
+            Err(FormulaValue::Error(CellError::Ref))
+        ));
+    }
+
+    #[test]
+    fn streaming_sum_preserves_range_order_types_errors_and_sheet_resolution() {
+        let mut workbook = Workbook::new();
+        workbook.add_worksheet_with_name("Other").unwrap();
+        for sheet_index in 0..2 {
+            let sheet = workbook.worksheet_mut(sheet_index).unwrap();
+            sheet.set_cell_value("A1", 1e16).unwrap();
+            sheet.set_cell_value("B1", 1.0).unwrap();
+            sheet.set_cell_value("A2", -1e16).unwrap();
+            sheet.set_cell_value("B2", 3.0).unwrap();
+            sheet.set_cell_value("A3", "12").unwrap();
+            sheet.set_cell_value("B3", true).unwrap();
+        }
+        for error in [false, true] {
+            if error {
+                let sheet = workbook.worksheet_mut(1).unwrap();
+                sheet
+                    .set_cell_value("B2", CellValue::Error(CellError::Div0))
+                    .unwrap();
+                sheet
+                    .set_cell_value("A3", CellValue::Error(CellError::Na))
+                    .unwrap();
+            }
+            let ctx = EvaluationContext::new(Some(&workbook), 0, 0, 0);
+            for sheet_name in [None, Some("Other"), Some("Missing")] {
+                let formula = format!(
+                    "=SUM({}A1:B4)",
+                    sheet_name.map(|s| format!("{s}!")).unwrap_or_default()
+                );
+                let expression = crate::parser::parse_formula(&formula).unwrap();
+                let generic = crate::functions::math::fn_sum(
+                    &[ctx.get_range_values(sheet_name, 0, 0, 3, 1)],
+                    &ctx,
+                )
+                .unwrap();
+                assert_eq!(evaluate(&expression, &ctx).unwrap(), generic, "{formula}");
+                if sheet_name.is_none() {
+                    assert_eq!(generic, FormulaValue::Number(3.0));
+                }
+            }
+        }
     }
 
     #[test]

@@ -11,3 +11,10 @@ Validate with `cargo test -p ssfmt -p duke-sheets-core` and `cargo test -p duke-
 Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.N` (next unused N). The generated manifest records the exact source commit. Never move an existing distribution tag.
 
 The application-level regression suite in `peasebell/e2e/tests/xlsx` exercises the packaged WASM through both the main-thread and worker viewer paths.
+
+## Editing scale and correctness (.3)
+
+- `storedCellCoordinates()` returns sorted, deduplicated row/column pairs for stored cells and formulas without formatting values or expanding merges.
+- Materialized range caches retain at most 16 MiB of payload per calculation pass; plain single-range SUM streams scalar values in the existing order.
+- Volatile/external roots seed transitive dependent invalidation alongside ordinary dirty inputs. The app retains full recalculation by default.
+- Regression coverage includes styled blanks/deletions, range-cache saturation, SUM value/error parity, external cross-sheet dependency closure, and 15,000 prefix SUM formulas.

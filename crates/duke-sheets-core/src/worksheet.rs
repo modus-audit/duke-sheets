@@ -737,6 +737,19 @@ impl Worksheet {
         Ok(())
     }
 
+    /// Remove a cell's explicit style without changing its value or formula.
+    pub fn clear_cell_style_at(&mut self, row: u32, col: u16) -> Result<()> {
+        self.validate_cell_position(row, col)?;
+        self.cells.set_style(row, col, 0);
+        // Only a truly absent value can be pruned; empty literal strings and formula caches stay.
+        if self.cells.get(row, col).is_some_and(|cell| matches!(cell.value, CellValue::Empty))
+            && self.cells.get_formula(row, col).is_none()
+        {
+            self.cells.remove(row, col);
+        }
+        Ok(())
+    }
+
     /// Clear a cell
     pub fn clear_cell(&mut self, address: &str) -> Result<()> {
         let addr = CellAddress::parse(address)?;
@@ -3007,6 +3020,40 @@ mod tests {
         assert_eq!(range.start.col, 3);
         assert_eq!(range.end.row, 10);
         assert_eq!(range.end.col, 7);
+    }
+
+    #[test]
+    fn test_clear_cell_style_preserves_value_and_formula() {
+        let mut ws = Worksheet::new("Test");
+        ws.set_cell_value_at(0, 0, "001").unwrap();
+        ws.set_formula_with_cached_value_at(1, 0, "=1+1", CellValue::Number(2.0))
+            .unwrap();
+        for row in [0, 1] {
+            ws.set_cell_style_at(row, 0, &Style::new().bold(true))
+                .unwrap();
+            ws.clear_cell_style_at(row, 0).unwrap();
+            assert!(ws.cell_style_at(row, 0).is_none());
+        }
+        assert_eq!(ws.get_value_at(0, 0), CellValue::string("001"));
+        assert_eq!(ws.get_value_at(1, 0), CellValue::Number(2.0));
+        assert_eq!(ws.get_formula_at(1, 0), Some("=1+1"));
+        assert!(ws.clear_cell_style_at(1_048_576, 0).is_err());
+        assert!(ws.clear_cell_style_at(0, 16_384).is_err());
+        let count = ws.cell_count();
+        ws.clear_cell_style_at(10, 10).unwrap();
+        assert_eq!(ws.cell_count(), count);
+        ws.set_cell_style_at(10, 10, &Style::new().bold(true)).unwrap();
+        ws.clear_cell_style_at(10, 10).unwrap();
+        assert_eq!(ws.cell_count(), count);
+        ws.set_cell_value_at(2, 0, "").unwrap();
+        ws.set_cell_style_at(2, 0, &Style::new().bold(true)).unwrap();
+        ws.clear_cell_style_at(2, 0).unwrap();
+        assert!(matches!(ws.get_value_at_ref(2, 0), CellValue::String(_)));
+        ws.set_formula_with_cached_value_at(3, 0, "=IF(TRUE,\"\",0)", CellValue::Empty).unwrap();
+        ws.set_cell_style_at(3, 0, &Style::new().bold(true)).unwrap();
+        ws.clear_cell_style_at(3, 0).unwrap();
+        assert_eq!(ws.get_formula_at(3, 0), Some("=IF(TRUE,\"\",0)"));
+        assert_eq!(ws.cell_count(), count + 2);
     }
 
     #[test]

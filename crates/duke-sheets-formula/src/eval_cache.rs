@@ -5,6 +5,7 @@
 //! - **Tier 2**: Lookup hash index - O(1) exact-match lookups for MATCH/VLOOKUP/XLOOKUP
 //! - **Tier 3**: Sheet name → index cache - avoids linear scan for cross-sheet references
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -15,6 +16,9 @@ use duke_sheets_core::{CellError, CellValue};
 
 /// Key for a materialized range: (sheet_idx, start_row, start_col, end_row, end_col).
 pub type RangeKey = (usize, u32, u16, u32, u16);
+
+// Bound retained range payloads per calculation pass, independent of formula count.
+const RANGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Key for a lookup index: range key + column offset within that range.
 pub type LookupIndexKey = (RangeKey, u16);
@@ -40,13 +44,14 @@ pub enum LookupSourceKey {
 /// Created once at the start of `execute_eval_plan()`, passed by reference
 /// into every `EvaluationContext`. Dropped when the eval pass completes.
 ///
-/// All fields use `DashMap` for lock-free concurrent access from the
-/// parallel (rayon) evaluation path.
+/// Shared maps use `DashMap` for concurrent access from the parallel
+/// (rayon) evaluation path.
 pub struct EvalCache {
     /// Tier 1: Materialized range values.
-    /// First call to `get_range_values()` for a given range key materializes
-    /// and stores the data; subsequent calls return an `Arc` clone.
+    /// A materialized range is retained only within the per-pass payload budget;
+    /// subsequent calls return an `Arc` clone when the range was retained.
     pub ranges: DashMap<RangeKey, Arc<Vec<Vec<FormulaValue>>>>,
+    range_cache_bytes: AtomicUsize,
 
     /// Tier 2: Hash index on a 1D lookup column for exact-match lookups.
     /// Key is (range_key, column_offset). Built lazily on first exact-match
@@ -67,11 +72,66 @@ impl EvalCache {
     pub fn new(sheet_names: AHashMap<String, usize>) -> Self {
         Self {
             ranges: DashMap::new(),
+            range_cache_bytes: AtomicUsize::new(0),
             lookup_indexes: DashMap::new(),
             source_lookup_indexes: DashMap::new(),
             sheet_names,
         }
     }
+
+    /// Cache a materialized range only while its retained payload fits the pass budget.
+    /// Accounting includes row/value buffers and string capacities, not allocator metadata.
+    pub fn cache_range(&self, key: RangeKey, values: Arc<Vec<Vec<FormulaValue>>>) {
+        use dashmap::mapref::entry::Entry;
+
+        let Some(bytes) = range_payload_bytes(&values) else {
+            return;
+        };
+        if let Entry::Vacant(entry) = self.ranges.entry(key) {
+            let mut used = self.range_cache_bytes.load(Ordering::Relaxed);
+            loop {
+                let Some(total) = used
+                    .checked_add(bytes)
+                    .filter(|&total| total <= RANGE_CACHE_BYTES)
+                else {
+                    return;
+                };
+                match self.range_cache_bytes.compare_exchange_weak(
+                    used,
+                    total,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        entry.insert(values);
+                        return;
+                    }
+                    Err(current) => used = current,
+                }
+            }
+        }
+    }
+}
+
+fn range_payload_bytes(rows: &Vec<Vec<FormulaValue>>) -> Option<usize> {
+    let mut bytes = std::mem::size_of_val(rows).checked_add(
+        rows.capacity()
+            .checked_mul(std::mem::size_of::<Vec<FormulaValue>>())?,
+    )?;
+    for row in rows {
+        bytes = bytes.checked_add(
+            row.capacity()
+                .checked_mul(std::mem::size_of::<FormulaValue>())?,
+        )?;
+        for value in row {
+            match value {
+                FormulaValue::String(text) => bytes = bytes.checked_add(text.capacity())?,
+                FormulaValue::Array { .. } => return None,
+                _ => {}
+            }
+        }
+    }
+    Some(bytes)
 }
 
 /// Hash index on a 1D vector of FormulaValues for O(1) exact-match lookup.

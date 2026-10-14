@@ -744,14 +744,11 @@ impl CalculationEngine {
             stats.volatile_cells = self.volatile_cells.len();
             plan = cache.plan;
             if !dirty_ranges.is_empty() {
-                affected_flags = Some(collect_affected_formula_flags(&plan, &dirty_ranges));
-                if let Some(flags) = affected_flags.as_mut() {
-                    for &cell in &self.volatile_cells {
-                        if let Some(&idx) = plan.cell_to_idx.get(&cell) {
-                            flags[idx as usize] = true;
-                        }
-                    }
-                }
+                affected_flags = Some(collect_affected_formula_flags(
+                    &plan,
+                    &dirty_ranges,
+                    &self.volatile_cells,
+                ));
             }
         } else {
             // Cache miss - full parse + DFS.
@@ -2243,7 +2240,11 @@ fn collect_dirty_value_ranges(workbook: &Workbook) -> Vec<SensitiveRange> {
     dirty
 }
 
-fn collect_affected_formula_flags(plan: &EvalPlan, dirty_ranges: &[SensitiveRange]) -> Vec<bool> {
+fn collect_affected_formula_flags(
+    plan: &EvalPlan,
+    dirty_ranges: &[SensitiveRange],
+    volatile_cells: &AHashSet<CellKey>,
+) -> Vec<bool> {
     let mut affected = vec![false; plan.idx_to_cell.len()];
     let mut stack = Vec::new();
 
@@ -2260,6 +2261,17 @@ fn collect_affected_formula_flags(plan: &EvalPlan, dirty_ranges: &[SensitiveRang
         if overlaps {
             affected[idx] = true;
             stack.push(idx as u32);
+        }
+    }
+
+    // Volatile/add-in values can change without an ordinary input edit.
+    // Seed them before propagation so their entire dependent closure updates too.
+    for cell in volatile_cells {
+        if let Some(&idx) = plan.cell_to_idx.get(cell) {
+            if !affected[idx as usize] {
+                affected[idx as usize] = true;
+                stack.push(idx);
+            }
         }
     }
 
@@ -2838,7 +2850,10 @@ mod tests {
             external_fn: Some(Arc::new(|book, name, args| {
                 assert_eq!(book, "1");
                 assert_eq!(name, "TBLink");
-                assert_eq!(args, &["acct".to_string(), "7".to_string(), "3".to_string()]);
+                assert_eq!(
+                    args,
+                    &["acct".to_string(), "7".to_string(), "3".to_string()]
+                );
                 Some(FormulaValue::Number(99.0))
             })),
             ..Default::default()
@@ -2858,8 +2873,12 @@ mod tests {
     fn test_unresolved_external_function_preserves_cached_value() {
         let mut workbook = Workbook::new();
         let sheet = workbook.worksheet_mut(0).unwrap();
-        sheet.set_cell_formula("A1", r#"=[1]!TBLink("acct")"#).unwrap();
-        sheet.set_formula_result(0, 0, CellValue::Number(42.0)).unwrap();
+        sheet
+            .set_cell_formula("A1", r#"=[1]!TBLink("acct")"#)
+            .unwrap();
+        sheet
+            .set_formula_result(0, 0, CellValue::Number(42.0))
+            .unwrap();
 
         let stats = workbook.calculate().unwrap();
         assert_eq!(stats.errors, 0);
@@ -4104,6 +4123,91 @@ mod tests {
             workbook.worksheet(0).unwrap().get_calculated_value_at(0, 1),
             Some(&CellValue::Number(2.0))
         );
+    }
+
+    #[test]
+    fn incremental_external_revisions_update_transitive_dependents_with_other_dirty_inputs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut workbook = Workbook::new();
+        let other = workbook.add_worksheet_with_name("Other").unwrap();
+        let source = Arc::new(AtomicUsize::new(10));
+        let value = source.clone();
+        let options = CalculationOptions {
+            force_full_calculation: false,
+            external_fn: Some(Arc::new(move |_, _, _| {
+                Some(FormulaValue::Number(value.load(Ordering::Relaxed) as f64))
+            })),
+            ..Default::default()
+        };
+        let sheet = workbook.worksheet_mut(0).unwrap();
+        sheet.set_cell_value("A1", 1.0).unwrap();
+        sheet
+            .set_cell_formula("B1", r#"=[1]!TBLink("acct")"#)
+            .unwrap();
+        sheet.set_cell_formula("C1", "=B1*2").unwrap();
+        sheet.set_cell_formula("D1", "=A1*3").unwrap();
+        workbook
+            .worksheet_mut(other)
+            .unwrap()
+            .set_cell_formula("A1", "=Sheet1!C1+1")
+            .unwrap();
+        workbook.calculate_with_options(&options).unwrap();
+
+        for (external, dirty) in [(20, Some(2.0)), (30, None)] {
+            source.store(external, Ordering::Relaxed);
+            if let Some(dirty) = dirty {
+                workbook
+                    .worksheet_mut(0)
+                    .unwrap()
+                    .set_cell_value("A1", dirty)
+                    .unwrap();
+            }
+            workbook.calculate_with_options(&options).unwrap();
+            assert_eq!(
+                workbook.worksheet(0).unwrap().get_calculated_value_at(0, 2),
+                Some(&CellValue::Number((external * 2) as f64))
+            );
+            assert_eq!(
+                workbook
+                    .worksheet(other)
+                    .unwrap()
+                    .get_calculated_value_at(0, 0),
+                Some(&CellValue::Number((external * 2 + 1) as f64))
+            );
+            assert_eq!(
+                workbook.worksheet(0).unwrap().get_calculated_value_at(0, 3),
+                Some(&CellValue::Number(6.0))
+            );
+        }
+    }
+
+    #[test]
+    fn fifteen_thousand_prefix_sums_calculate_without_materializing_prefix_arrays() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.worksheet_mut(0).unwrap();
+        for row in 0..15_000 {
+            sheet.set_cell_value_at(row, 0, (row + 1) as f64).unwrap();
+            sheet
+                .set_cell_formula_at(row, 1, &format!("=SUM(A1:A{})", row + 1))
+                .unwrap();
+        }
+        let stats = workbook
+            .calculate_with_options(&CalculationOptions {
+                max_threads: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(stats.cells_calculated, 15_000);
+        assert_eq!(stats.errors, 0);
+        let sheet = workbook.worksheet(0).unwrap();
+        for row in 0..15_000 {
+            let n = (row + 1) as u64;
+            assert_eq!(
+                sheet.get_calculated_value_at(row, 1),
+                Some(&CellValue::Number((n * (n + 1) / 2) as f64))
+            );
+        }
     }
 
     fn assert_cached_vs_full_equivalence(wb_cached: &Workbook, wb_full: &Workbook) {
