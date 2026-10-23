@@ -11,3 +11,7 @@ Validate with `cargo test -p ssfmt -p duke-sheets-core` and `cargo test -p duke-
 Build the browser package with `wasm-pack build bindings/wasm --target web --out-dir pkg --release`, then run `node bindings/wasm/package-modus.mjs` from a committed source revision. Copy the contents of `bindings/wasm/pkg` into a distribution branch and tag it `wasm-dist-0.1.23-modus.N` (next unused N). The generated manifest records the exact source commit. Never move an existing distribution tag.
 
 The application-level regression suite in `peasebell/e2e/tests/xlsx` exercises the packaged WASM through both the main-thread and worker viewer paths.
+
+## Certificate-trust rebuild (.4)
+
+Rebuilt the existing browser engine with the October 2026 certificate-trust remediation applied to the source checkout. The release retains the accounting, reconciliation precision, and serial browser calculation patches; its WASM implementation is unchanged.
