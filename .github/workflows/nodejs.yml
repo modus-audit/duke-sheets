@@ -71,9 +71,10 @@ jobs:
         if: ${{ contains(matrix.settings.target, 'musl') }}
         shell: bash
         run: |
-          python3 ../../tools/upgrade-python-trust.py
-          python3 -m pip install --use-deprecated=legacy-certs ziglang==0.14.1
-          python3 -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent)' >> "$GITHUB_PATH"
+          python3 -m venv --without-pip "$RUNNER_TEMP/zig-python"
+          "$RUNNER_TEMP/zig-python/bin/python" ../../tools/upgrade-python-trust.py
+          "$RUNNER_TEMP/zig-python/bin/python" -m pip install --use-deprecated=legacy-certs ziglang==0.14.1
+          "$RUNNER_TEMP/zig-python/bin/python" -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent)' >> "$GITHUB_PATH"
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
