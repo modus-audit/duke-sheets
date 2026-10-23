@@ -27,6 +27,9 @@ PACKAGES = {
 }
 
 
+MAX_WHEEL_BYTES = 8 * 1024 * 1024
+
+
 def outdated_packages():
     outdated = []
     for name, (minimum, _, _) in PACKAGES.items():
@@ -48,7 +51,9 @@ def outdated_packages():
 def download(name, directory):
     _, url, expected_hash = PACKAGES[name]
     with urllib.request.urlopen(url, timeout=60) as response:
-        data = response.read()
+        data = response.read(MAX_WHEEL_BYTES + 1)
+    if len(data) > MAX_WHEEL_BYTES:
+        raise ValueError(f"Wheel for {name} exceeds {MAX_WHEEL_BYTES} bytes; refusing to install")
     if hashlib.sha256(data).hexdigest() != expected_hash:
         raise ValueError(f"SHA-256 mismatch for {name}; refusing to install")
     wheel = directory / url.rsplit("/", 1)[1]
