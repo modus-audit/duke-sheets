@@ -1,5 +1,9 @@
 # Modus viewer engine
 
+## Lazy IF evaluation (.5)
+
+IF evaluates its condition and only the selected branch. Blank template rows no longer fail on text arithmetic in an unused branch; errors in selected branches still propagate. Workbook regression coverage includes blank formula results and populated rows.
+
 Based on upstream `wasm-v0.1.23` (`b30fff867622703f71edea6be16f20a2d4f96193`).
 
 The Modus patches preserve built-in accounting formats 41–44 in both format registries and cancel floating-point reconciliation residue without rounding real differences or exact integer subtraction. External add-in callbacks and cached unresolved values now come from upstream.
