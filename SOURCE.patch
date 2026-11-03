@@ -1,10 +1,14 @@
 diff --git a/MODUS_PATCHES.md b/MODUS_PATCHES.md
 new file mode 100644
-index 0000000..fa31992
+index 0000000..fb9573e
 --- /dev/null
 +++ b/MODUS_PATCHES.md
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,21 @@
 +# Modus viewer engine
++
++## Lazy IF evaluation (.5)
++
++IF evaluates its condition and only the selected branch. Blank template rows no longer fail on text arithmetic in an unused branch; errors in selected branches still propagate. Workbook regression coverage includes blank formula results and populated rows.
 +
 +Based on upstream `wasm-v0.1.23` (`b30fff867622703f71edea6be16f20a2d4f96193`).
 +
@@ -70,7 +74,7 @@ index f534b1a..b7d6eb9 100644
    }
  }
 diff --git a/bindings/wasm/Cargo.lock b/bindings/wasm/Cargo.lock
-index fbc4e1c..c2d251e 100644
+index fbc4e1c..be38378 100644
 --- a/bindings/wasm/Cargo.lock
 +++ b/bindings/wasm/Cargo.lock
 @@ -296,25 +296,6 @@ dependencies = [
@@ -112,7 +116,7 @@ index fbc4e1c..c2d251e 100644
  [[package]]
  name = "duke-sheets-wasm"
 -version = "0.1.23"
-+version = "0.1.23-modus.4"
++version = "0.1.23-modus.5"
  dependencies = [
   "chrono",
   "duke-sheets",
@@ -157,14 +161,14 @@ index fbc4e1c..c2d251e 100644
  name = "rc4"
  version = "0.2.0"
 diff --git a/bindings/wasm/Cargo.toml b/bindings/wasm/Cargo.toml
-index 41a982f..267b6dd 100644
+index 41a982f..536a769 100644
 --- a/bindings/wasm/Cargo.toml
 +++ b/bindings/wasm/Cargo.toml
 @@ -1,6 +1,6 @@
  [package]
  name = "duke-sheets-wasm"
 -version = "0.1.23"
-+version = "0.1.23-modus.4"
++version = "0.1.23-modus.5"
  edition = "2021"
  description = "WebAssembly bindings for duke-sheets - high-performance Excel library"
  license = "MIT"
@@ -262,7 +266,7 @@ index df7e64a..135ab58 100644
              46 => "[h]:mm:ss",
              47 => "mm:ss.0",
 diff --git a/crates/duke-sheets-formula/src/evaluator.rs b/crates/duke-sheets-formula/src/evaluator.rs
-index 515b5a7..99e3417 100644
+index 515b5a7..c091a1f 100644
 --- a/crates/duke-sheets-formula/src/evaluator.rs
 +++ b/crates/duke-sheets-formula/src/evaluator.rs
 @@ -878,6 +878,20 @@ fn to_array(val: &FormulaValue) -> Vec<Vec<FormulaValue>> {
@@ -316,6 +320,47 @@ index 515b5a7..99e3417 100644
          None => Err(FormulaError::ExternalFunctionUnresolved(format!(
              "[{book}]!{name}"
          ))),
+@@ -2206,6 +2219,11 @@ fn evaluate_function(
+         }
+     }
+ 
++    // IF needs unevaluated branches so the unused branch can be skipped.
++    if lookup_name == "IF" {
++        return evaluate_if(args, ctx);
++    }
++
+     // Special case: AREAS needs the raw AST to count union branches.
+     if lookup_name == "AREAS" {
+         return evaluate_areas(args, ctx);
+@@ -2321,6 +2339,28 @@ fn evaluate_function(
+     (func.implementation)(&evaluated_args, ctx)
+ }
+ 
++/// IF evaluates the condition and only the selected branch.
++/// Argument counts are validated by evaluate_function before dispatch.
++fn evaluate_if(args: &[FormulaExpr], ctx: &EvaluationContext) -> FormulaResult<FormulaValue> {
++    let condition = evaluate(&args[0], ctx)?;
++
++    // Preserve the condition handling in logical::fn_if.
++    let condition_bool = match condition {
++        FormulaValue::Boolean(b) => b,
++        FormulaValue::Number(n) => n != 0.0,
++        FormulaValue::Error(e) => return Ok(FormulaValue::Error(e)),
++        _ => return Ok(FormulaValue::Error(CellError::Value)),
++    };
++
++    if condition_bool {
++        evaluate(&args[1], ctx)
++    } else if let Some(else_branch) = args.get(2) {
++        evaluate(else_branch, ctx)
++    } else {
++        Ok(FormulaValue::Boolean(false))
++    }
++}
++
+ /// FORMULATEXT requires special handling: it needs the raw cell reference
+ /// expression to look up the formula text, not the evaluated cell value.
+ fn evaluate_formulatext(
 diff --git a/crates/duke-sheets/examples/profile_calc.rs b/crates/duke-sheets/examples/profile_calc.rs
 index d2d0950..02b68e0 100644
 --- a/crates/duke-sheets/examples/profile_calc.rs
@@ -330,10 +375,89 @@ index d2d0950..02b68e0 100644
                      self.extract_refs_from_expr(arg, current_sheet, refs);
                  }
 diff --git a/crates/duke-sheets/tests/formula_evaluation.rs b/crates/duke-sheets/tests/formula_evaluation.rs
-index 518180e..d7ce969 100644
+index 518180e..740c6e1 100644
 --- a/crates/duke-sheets/tests/formula_evaluation.rs
 +++ b/crates/duke-sheets/tests/formula_evaluation.rs
-@@ -79,6 +79,95 @@ fn test_evaluate_with_cell_references() {
+@@ -48,6 +48,78 @@ fn test_evaluate_if() {
+     assert_eq!(result, FormulaValue::String("No".into()));
+ }
+ 
++#[test]
++fn test_if_lazy_branches_in_workbook() {
++    let mut wb = Workbook::new();
++    let cases = [
++        // The blank template row must not evaluate arithmetic on text.
++        ("=IF(A1=\"\",\"\",A1*2)", CellValue::string("")),
++        ("=IF(A2=\"\",\"\",A2*2)", CellValue::Number(42.0)),
++        ("=IF(FALSE,\"invalid\"*2,7)", CellValue::Number(7.0)),
++        ("=IF(TRUE,7,\"invalid\"*2)", CellValue::Number(7.0)),
++        ("=IF(TRUE,1/0,7)", CellValue::Error(CellError::Div0)),
++        ("=IF(FALSE,7,1/0)", CellValue::Error(CellError::Div0)),
++        ("=IF(1/0,7,8)", CellValue::Error(CellError::Div0)),
++        ("=IF(FALSE,\"invalid\"*2)", CellValue::Boolean(false)),
++    ];
++    {
++        let sheet = wb.worksheet_mut(0).unwrap();
++        // A formula returning an empty string is typical in template rows.
++        sheet.set_cell_formula("A1", "=\"\"").unwrap();
++        sheet.set_cell_value("A2", 21.0).unwrap();
++        for (row, (formula, _)) in cases.iter().enumerate() {
++            sheet
++                .set_cell_formula(&format!("B{}", row + 1), formula)
++                .unwrap();
++        }
++    }
++
++    wb.calculate().unwrap();
++
++    let sheet = wb.worksheet(0).unwrap();
++    for (row, (formula, expected)) in cases.iter().enumerate() {
++        assert_eq!(sheet.get_value_at(row as u32, 1), *expected, "{formula}");
++    }
++}
++
++#[test]
++fn test_if_preserves_validation_and_error_handling() {
++    let ctx = EvaluationContext::simple();
++    for formula in ["=IF(TRUE)", "=IF(TRUE,1,2,3)"] {
++        let error = evaluate(&parse_formula(formula).unwrap(), &ctx).unwrap_err();
++        assert!(matches!(
++            error,
++            duke_sheets_formula::FormulaError::ArgumentCount { .. }
++        ));
++    }
++    for formula in [
++        "=IF(TRUE,\"invalid\"*2,7)",
++        "=IF(FALSE,7,\"invalid\"*2)",
++        "=IF(\"invalid\"*2,7,8)",
++        "=AND(FALSE,\"invalid\"*2)",
++        "=OR(TRUE,\"invalid\"*2)",
++    ] {
++        assert!(
++            evaluate(&parse_formula(formula).unwrap(), &ctx).is_err(),
++            "{formula}"
++        );
++    }
++    for (formula, expected) in [
++        ("=IF(2,7,\"invalid\"*2)", FormulaValue::Number(7.0)),
++        ("=IF(0,\"invalid\"*2,8)", FormulaValue::Number(8.0)),
++        ("=IF(\"TRUE\",7,8)", FormulaValue::Error(CellError::Value)),
++        ("=IF(A1,7,8)", FormulaValue::Error(CellError::Value)),
++        ("=AND(FALSE,1/0)", FormulaValue::Error(CellError::Div0)),
++        ("=OR(TRUE,1/0)", FormulaValue::Error(CellError::Div0)),
++    ] {
++        assert_eq!(
++            evaluate(&parse_formula(formula).unwrap(), &ctx).unwrap(),
++            expected,
++            "{formula}"
++        );
++    }
++}
++
+ /// Test formula evaluation with cell references
+ #[test]
+ fn test_evaluate_with_cell_references() {
+@@ -79,6 +151,95 @@ fn test_evaluate_with_cell_references() {
      assert_eq!(result, FormulaValue::Boolean(true));
  }
  
@@ -429,7 +553,7 @@ index 518180e..d7ce969 100644
  /// Test formula evaluation with range references
  #[test]
  fn test_evaluate_with_range_references() {
-@@ -233,7 +322,10 @@ fn test_workbook_calculate_power_zero_zero() {
+@@ -233,7 +394,10 @@ fn test_workbook_calculate_power_zero_zero() {
      ctx.eval_cache = Some(&cache);
      let ast = parse_formula(wb.worksheet(0).unwrap().get_formula_at(0, 0).unwrap()).unwrap();
      // Excel returns #NUM! for POWER(0,0)
@@ -441,7 +565,7 @@ index 518180e..d7ce969 100644
  
      wb.calculate().unwrap();
  
-@@ -308,9 +400,9 @@ fn test_loaded_parity_cells_recalculate() {
+@@ -308,9 +472,9 @@ fn test_loaded_parity_cells_recalculate() {
      wb.calculate().unwrap();
  
      let tests_sheet = wb.worksheet(tests_sheet_idx).unwrap();
